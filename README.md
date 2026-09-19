@@ -1,6 +1,4 @@
-Yes. Put the following **exactly into the root `README.md`**. It is written for your **actual repository structure**, not the hypothetical `frontend/` folder structure.
 
-````md
 # Vibe Guard
 
 ## AI-Powered Secure Code Auditor for AI-Generated Applications
