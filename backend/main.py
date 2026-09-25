@@ -5,10 +5,11 @@ import shutil
 import stat
 import uuid
 import zipfile
+import zlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
@@ -104,18 +105,42 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def reject_oversized_upload(request: Request, call_next):
-    # Multipart bodies are parsed before the route runs, so reject by declared size first.
-    # Bodies without Content-Length are still bounded by the streaming check in _save_upload.
-    if request.method == "POST" and request.url.path in UPLOAD_PATHS:
-        content_length = request.headers.get("content-length", "")
-        if content_length.isdigit() and int(content_length) > MAX_FILE_SIZE + MULTIPART_OVERHEAD:
-            return JSONResponse(
-                status_code=413,
-                content={"detail": f"File size exceeds maximum allowed limit of {MAX_FILE_SIZE // (1024 * 1024)}MB"},
-            )
-    return await call_next(request)
+UPLOAD_TOO_LARGE_DETAIL = f"File size exceeds maximum allowed limit of {MAX_FILE_SIZE // (1024 * 1024)}MB"
+
+
+class UploadSizeLimitMiddleware:
+    """
+    Multipart bodies are parsed (and spooled to disk) before the route runs, so the size limit is enforced here:
+    by declared Content-Length first, and by counting received bytes for bodies without one (chunked).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] not in UPLOAD_PATHS:
+            return await self.app(scope, receive, send)
+        limit = MAX_FILE_SIZE + MULTIPART_OVERHEAD
+        content_length = dict(scope["headers"]).get(b"content-length", b"").decode("latin-1")
+        if content_length.isdigit() and int(content_length) > limit:
+            response = JSONResponse(status_code=413, content={"detail": UPLOAD_TOO_LARGE_DETAIL})
+            return await response(scope, receive, send)
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    # FastAPI re-raises HTTPException from body parsing, so this becomes a normal 413 response.
+                    raise HTTPException(status_code=413, detail=UPLOAD_TOO_LARGE_DETAIL)
+            return message
+
+        return await self.app(scope, limited_receive, send)
+
+
+app.add_middleware(UploadSizeLimitMiddleware)
 
 
 @app.get("/api/health", tags=["Health"])
@@ -168,7 +193,8 @@ def _extract_zip_safely(archive_path: Path, dest_dir: Path) -> int:
                 # Zip Slip / path traversal protection
                 name = member.filename.replace("\\", "/")
                 parts = PurePosixPath(name).parts
-                if name.startswith("/") or ".." in parts or (parts and ":" in parts[0]):
+                # ":" is rejected in every part: a drive prefix, or an NTFS alternate data stream on Windows
+                if name.startswith("/") or ".." in parts or any(":" in part for part in parts):
                     raise _reject_archive("Archive contains an unsafe path")
 
                 target = (dest_root / name).resolve()
@@ -179,6 +205,8 @@ def _extract_zip_safely(archive_path: Path, dest_dir: Path) -> int:
                     target.mkdir(parents=True, exist_ok=True)
                     continue
 
+                if target.is_dir():
+                    raise _reject_archive("Uploaded file is not a valid ZIP archive")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Count actual decompressed bytes rather than trusting header sizes
                 with archive.open(member) as source, open(target, "wb") as output:
@@ -190,7 +218,8 @@ def _extract_zip_safely(archive_path: Path, dest_dir: Path) -> int:
                             )
                         output.write(chunk)
                 extracted_files += 1
-    except zipfile.BadZipFile:
+    # Corrupt compressed data, an unsupported compression method, or a file/directory name clash
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, FileExistsError, NotADirectoryError):
         raise _reject_archive("Uploaded file is not a valid ZIP archive")
 
     return extracted_files

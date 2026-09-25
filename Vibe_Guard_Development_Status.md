@@ -39,9 +39,9 @@ Do not redesign or rebuild the frontend unless explicitly instructed.
 | Phase 9 — Database | ✅ COMPLETE | Yes |
 | Phase 10 — Report API | ✅ COMPLETE | Yes |
 | Phase 11 — Replace Frontend Mock Data | ✅ COMPLETE | Yes |
-| Phase 12 — Testing | ⏳ PENDING | No |
-| Phase 13 — Security Hardening | ⏳ PENDING | No |
-| Phase 14 — Docker / Deployment | ⏳ PENDING | No |
+| Phase 12 — Testing (final testing & hardening validation) | ✅ COMPLETE | Yes |
+| Phase 13 — Security Hardening | ⏳ NOT STARTED (checklist reviewed within Phase 12) | No |
+| Phase 14 — Docker / Deployment | ⏳ NOT STARTED | No |
 
 ---
 
@@ -165,13 +165,77 @@ Known remaining issues:
 
 ## Phase 12 — Testing
 
-Status: ⏳ PENDING / NOT STARTED
-
-Not started. Awaiting explicit authorization. See the master blueprint for Phase 12 requirements.
+Status: ✅ COMPLETE. Phase 12 is the final phase of the current development plan; no further phase is authorized.
+Blueprint Phase 13 and Phase 14 remain NOT STARTED.
 
 ---
 
 # Phase Completion Log
+
+## Phase 12
+
+Status: ✅ COMPLETE (final testing and security-hardening validation of the existing implementation)
+
+Started / Completed:
+`2026-09-25`
+
+Scope note:
+- The Blueprint Phase 13 security-hardening checklist (upload limits, archive extraction, path traversal, oversized files, file counts, environment secrets, CORS, error leakage, temporary files, AI input handling, database access, logging, dependency security) was reviewed and addressed as part of this Phase 12 final validation
+- Blueprint Phase 13 itself remains NOT STARTED and is not marked complete. Blueprint Phase 14 (Docker / Deployment) remains NOT STARTED
+- `Blueprint.md` was intentionally left unchanged. No new phase was created
+
+Baseline (before any change):
+- Backend: `cd backend && venv/Scripts/python -m unittest discover -s tests -v` → 153 run, all passed, 1 skipped (Windows symlink test)
+- `npm run build` → passed
+
+Confirmed defects (each reproduced by a failing test before it was fixed):
+1. Malformed ZIPs returned 500 "Failed to save uploaded file" instead of 400: corrupt deflate data (`zlib.error`), unsupported compression method (`NotImplementedError`), and a file/directory name clash (`x` + `x/y.py`)
+2. A chunked upload (no `Content-Length`) was read and spooled to disk in full before the 5 MB limit applied. The response was 413, but the server consumed all 40 MB of a 40 MB body
+3. `:` was only rejected in the first path part of a ZIP entry. `sub/a.py:stream` was accepted and wrote an NTFS alternate data stream on Windows; `sub/dir:x/a.py` returned 500
+4. The root `.gitignore` did not ignore `.env` or `*.db` (`git check-ignore` matched nothing); only `backend/.gitignore` did. A root Vite `.env` would have been tracked
+
+Fixes (smallest change for each):
+1. `backend/main.py` `_extract_zip_safely`: the `except` clause now maps `zlib.error`, `EOFError`, `NotImplementedError`, `FileExistsError`, `NotADirectoryError` (with `BadZipFile`) to 400 "Uploaded file is not a valid ZIP archive". A file entry whose target is an existing directory is rejected explicitly (Windows raises the too-broad `PermissionError` there)
+2. `backend/main.py`: the `@app.middleware("http")` size check was replaced by the ASGI `UploadSizeLimitMiddleware` on the same upload paths. It keeps the early 413 by `Content-Length` and also counts received body bytes, raising `HTTPException(413)` once `MAX_FILE_SIZE + MULTIPART_OVERHEAD` is exceeded. Same status and detail as before; the unused `Request` import was removed
+3. `backend/main.py`: `":"` is rejected in every path part of a ZIP entry
+4. `.gitignore`: added `.env` and `*.db`
+
+Tests added (`backend/tests/test_phase12_hardening.py`, 46 tests; temporary upload dir and SQLite DB per test, Groq replaced by a recording fake):
+- Upload/archive: valid file/ZIP, unsupported types, oversized (Content-Length), chunked oversized cut off early (ASGI app driven directly, since TestClient reads whole bodies), chunked within limit, not-a-zip, truncated, corrupt deflate, unsupported method, name clash, 10 unsafe paths incl. ADS, 1001 vs 1000 entries, 54 MB extracted bomb, forged header sizes, encrypted flag, symlink attribute, filename traversal → basename, empty ZIP. Every rejection leaves no directory and no registered scan
+- Uploaded code never run: `setup.py`/`__init__.py`/`conftest.py`/`os.system`/`package.json` preinstall/`install.sh` payloads produce no marker file; uploaded `.semgrepignore`/`.bandit` do not hide findings; backend source has no `eval`/`exec`/`import_module`/`__import__`/`shell=True`/`runpy`/`pickle`/`yaml.load`/`os.system`/`os.popen`/`extractall`
+- Scanners: empty project (score 100, Bandit skipped), syntax-error Python, multiple findings; semgrep unavailable, timeout, non-zero exit, invalid JSON, wrong-shape JSON, crash with a path in the message → scan `failed`, no score, no findings, 409 report, no path leaked
+- Normalization: all 8 categories via Semgrep metadata, Bandit IDs and CWE fallback; severity mapping incl. unknown → MEDIUM; cross-scanner merge and repeat drop; 9 malformed/unsafe results skipped and counted; absolute path inside source → relative; shuffled input → identical output and `VG-001…` IDs
+- Scoring: zero findings, mixed, each cap, floor 0, 300 random repeatability + monotonicity cases (adding a finding never raises the score)
+- AI: sentinel `GROQ_API_KEY` absent from every API response, result file and the DB file, and present only in the Authorization header; HTTP 500/401, network error and timeout → AI `failed`, scan `completed`, score equals recomputed score; invalid JSON, non-object, missing fields, extra `severity`/`score` fields, wrong `finding_id` → `invalid_output`; prompt-injection comments travel only in the JSON user message, system prompt fixed, score identical to a no-AI scan; secret literals redacted before sending
+- Persistence/exposure: failure inside `complete()` rolls back (0 findings, 0 AI rows, scan `failed`, generic error); queued scan → 409; stored score = API score = `score.json` = recomputed score; no absolute paths, `scanner_metadata`, `raw`, `column`, `stderr`, `results`, `analyses` in any response; public `id` is `{scan_id}:VG-NNN`, never the integer DB id; invalid IDs → 400/404
+
+Final results:
+- Backend: 199 run, all passed, 1 skipped (the existing Windows symlink test)
+- `npm run build` → passed
+
+Live verification (uvicorn on a scratch `DATABASE_URL`, `GROQ_API_KEY` unset; Vite on port 5174; driven in Chrome):
+- HTTP (curl): `/api/health` → 200; 6 MB upload → 413 with `Content-Length` and with `Transfer-Encoding: chunked`; ZIP with vulnerable Python/JS and a marker-writing `setup.py` → `completed`, score 55 "Needs work", 6 findings, AI `disabled`; no absolute path or internal keys in `/api/scans`, `/api/reports`, report detail, findings, finding detail; no `PWNED_MARKER` anywhere
+- Browser: UI upload → progress page reached "Security report ready" and polling stopped (no `/status` requests in the next 5 s); report and finding detail show real data; AI-disabled finding shows "not available (skipped)"; AI text with `<script>`, `<img onerror>`, `<b>` and `javascript:` links (planted in the scratch DB) rendered as literal text, no elements created, no script ran; queued scan → "Report not available (scan status: queued)." + progress link; invalid/unknown report → "Report not found."; unknown `VG-999` → "Finding not found."; invalid progress ID → "Unable to track scan"; History lists completed and queued scans; backend stopped → "The Vibe Guard API is unavailable…"; empty DB → empty states on Dashboard, Reports and History; no console errors
+
+Security / hygiene checks (repository hygiene checks, not proof that no secret exists):
+- `git ls-files`: no `.env`, `*.db`, `uploads/`, `venv/`, `dist/`, logs or `__pycache__`
+- `git grep` for `gsk_…`, `sk-…`, `AKIA…`, `GROQ_API_KEY=.+`: only fake test keys in `backend/tests/` and the empty `GROQ_API_KEY=` in `.env.example`
+- Backend: no dynamic-execution patterns (list above); scanners keep `shell=False`, a stripped environment, `--` before paths, `--disable-nosem`, `--ignore-nosec`, no git, and timeouts that kill the process tree; no `print`/logging of environment, headers or keys. The API key is read at call time and used only in the Authorization header
+- Frontend: no `dangerouslySetInnerHTML`, `eval`, `new Function`, `innerHTML`, `insertAdjacentHTML`, `document.write`; 5xx/network bodies are never shown (`describeError`); the only `console.log` is the non-sensitive health check in `App.jsx`
+- Dependencies: none added or removed
+- Pre-existing `backend/uploads/` scan directories (`ceb740ac…`, `57344f86…`) were not modified (latest mtime inside them predates this phase). No `backend/vibe_guard.db` existed during this phase; all live tests used scratch databases
+
+Files changed:
+- `backend/main.py`
+- `.gitignore`
+- `backend/tests/test_phase12_hardening.py` (new)
+- `Vibe_Guard_Development_Status.md`
+
+Known limitations (intentionally not fixed; fixing would be new functionality):
+- A scan left in `scanning`/`analyzing` when the server stops stays in that status, and Scan Progress keeps polling it
+- `App.jsx` logs the health response `{status: "ok"}` to the console (non-sensitive)
+- Windows reserved names (`CON`, `nul.py`) in ZIP entries are written as ordinary files on Windows 11 (verified); not a defect on this platform
+- Cleanup: both live-test scan directories created by this phase (`64cdf8ed…`, `51bcb670…`) were removed by exact, guarded paths after provenance checks; `backend/uploads/` again holds only the two pre-existing directories (`ceb740ac…`, `57344f86…`)
 
 ## Phase 11
 
