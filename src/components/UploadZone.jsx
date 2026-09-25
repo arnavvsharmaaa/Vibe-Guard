@@ -1,17 +1,19 @@
 import { useRef } from "react";
 import Icon from "./Icon";
-import { mockUpload } from "../data/mockData";
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export default function UploadZone({ file, onSelect }) {
   const inputRef = useRef(null);
 
-  function applyMockFile() {
-    onSelect(mockUpload);
-  }
-
   function onDrop(event) {
     event.preventDefault();
-    applyMockFile();
+    const dropped = event.dataTransfer.files?.[0];
+    if (dropped) onSelect(dropped);
   }
 
   return (
@@ -24,7 +26,10 @@ export default function UploadZone({ file, onSelect }) {
         role="button"
         tabIndex={0}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") applyMockFile();
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            inputRef.current?.click();
+          }
         }}
       >
         <div className="upload-icon">
@@ -46,16 +51,20 @@ export default function UploadZone({ file, onSelect }) {
           ref={inputRef}
           type="file"
           hidden
-          onChange={applyMockFile}
+          onChange={(event) => {
+            const selected = event.target.files?.[0];
+            if (selected) onSelect(selected);
+            event.target.value = "";
+          }}
         />
       </div>
       {file ? (
         <div className="file-selected">
           <div>
             <div style={{ fontWeight: 600 }}>{file.name}</div>
-            <div className="muted">{file.size}</div>
+            <div className="muted">{formatSize(file.size)}</div>
           </div>
-          <span className="badge pass">✓ {file.status}</span>
+          <span className="badge pass">✓ Ready to scan</span>
         </div>
       ) : null}
     </div>

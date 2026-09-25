@@ -2,7 +2,9 @@ import { Link } from "react-router-dom";
 import StatCard from "../components/StatCard";
 import SecurityScore from "../components/SecurityScore";
 import SeverityBadge from "../components/SeverityBadge";
-import { dashboardSummary } from "../data/mockData";
+import useApiResource from "../hooks/useApiResource";
+import { describeError, listReports } from "../services/api";
+import { mapReportSummary } from "../services/mappers";
 
 const SEVERITY_COLORS = {
   critical: "var(--critical)",
@@ -12,20 +14,45 @@ const SEVERITY_COLORS = {
 };
 
 export default function Dashboard() {
-  const { score, scoreLabel, total, severity, categories, recentScan } = dashboardSummary;
+  const { data, error, loading } = useApiResource((signal) => listReports(signal), []);
+  const latest = data?.reports?.[0];
+
+  const header = (
+    <div className="page-header">
+      <div>
+        <h1 className="page-title">Security Overview</h1>
+        <p className="page-subtitle">AI-powered security analysis for your application code.</p>
+      </div>
+      <Link className="btn btn-primary" to="/scan">
+        + New Scan
+      </Link>
+    </div>
+  );
+
+  if (loading || error || !latest) {
+    return (
+      <div>
+        {header}
+        <div className="card empty-state">
+          {loading
+            ? "Loading security overview..."
+            : error
+              ? describeError(error)
+              : "No completed scans yet. Run a new scan to see your security overview."}
+        </div>
+      </div>
+    );
+  }
+
+  const report = mapReportSummary(latest);
+  const { score, scoreLabel, severity, categories } = report;
+  const total = report.findings;
+  const recentScan = { project: report.project, status: report.status, score, findings: total, reportId: report.id };
   const maxCategory = Math.max(...Object.values(categories), 1);
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Security Overview</h1>
-          <p className="page-subtitle">AI-powered security analysis for your application code.</p>
-        </div>
-        <Link className="btn btn-primary" to="/scan">
-          + New Scan
-        </Link>
-      </div>
+      {header}
 
       <div className="grid-stats">
         <StatCard label="Security Score" value={`${score}/100`} meta={scoreLabel} />
@@ -45,7 +72,7 @@ export default function Dashboard() {
                 <div
                   className="dist-fill"
                   style={{
-                    width: `${((severity[key] || 0) / total) * 100}%`,
+                    width: `${((severity[key] || 0) / (total || 1)) * 100}%`,
                     background: SEVERITY_COLORS[key],
                   }}
                 />

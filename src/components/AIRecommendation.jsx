@@ -38,7 +38,7 @@ export default function AIRecommendation({ finding }) {
         <div className="ai-step">
           <h3>Corrected Code</h3>
           <p className="muted" style={{ margin: 0 }}>
-            Replace string concatenation and untrusted interpolation with a parameterized, validated implementation. The suggested fix is shown in the code viewer.
+            The suggested fix is shown in the code viewer.
           </p>
         </div>
       </div>

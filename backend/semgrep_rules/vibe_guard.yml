@@ -1,0 +1,179 @@
+# Vibe Guard local Semgrep ruleset (Phase 5).
+# Minimal, demonstrable rules for the seven Blueprint categories. Not exhaustive.
+rules:
+  # 1. SQL Injection
+  - id: vg.python.sql-injection.string-built-query
+    languages: [python]
+    severity: ERROR
+    message: SQL query built with string formatting or concatenation is passed to execute()
+    metadata: {category: sql-injection, cwe: "CWE-89"}
+    pattern-either:
+      - pattern: $CUR.execute("..." % ..., ...)
+      - pattern: $CUR.execute("..." + ..., ...)
+      - pattern: $CUR.execute(f"...", ...)
+      - pattern: $CUR.execute("...".format(...), ...)
+  - id: vg.js.sql-injection.string-built-query
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: SQL query built with concatenation or a template literal is passed to query()
+    metadata: {category: sql-injection, cwe: "CWE-89"}
+    pattern-either:
+      - pattern: $DB.query("..." + $X, ...)
+      - pattern: $DB.query(`...${$X}...`, ...)
+
+  # 2. Cross-Site Scripting
+  - id: vg.js.xss.inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Assigning non-literal data to innerHTML/outerHTML can lead to XSS
+    metadata: {category: xss, cwe: "CWE-79"}
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $X
+          - pattern: $EL.outerHTML = $X
+      - pattern-not: $EL.innerHTML = "..."
+      - pattern-not: $EL.outerHTML = "..."
+  - id: vg.js.xss.dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: dangerouslySetInnerHTML renders raw HTML and can lead to XSS
+    metadata: {category: xss, cwe: "CWE-79"}
+    pattern: "<$EL dangerouslySetInnerHTML={...} />"
+  - id: vg.python.xss.markup-safe
+    languages: [python]
+    severity: WARNING
+    message: Marking non-literal data as safe HTML disables autoescaping and can lead to XSS
+    metadata: {category: xss, cwe: "CWE-79"}
+    patterns:
+      - pattern-either:
+          - pattern: Markup($X)
+          - pattern: mark_safe($X)
+      - pattern-not: Markup("...")
+      - pattern-not: mark_safe("...")
+
+  # 3. Hardcoded passwords / API keys / secrets
+  - id: vg.generic.hardcoded-secret
+    languages: [python, javascript, typescript]
+    severity: ERROR
+    message: Hardcoded credential assigned to a variable
+    metadata: {category: hardcoded-secret, cwe: "CWE-798"}
+    patterns:
+      - pattern: $NAME = "$VALUE"
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(password|passwd|secret|api_?key|access_?token|private_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: .{6,}
+
+  # 4. Command Injection
+  - id: vg.python.command-injection.shell-true
+    languages: [python]
+    severity: ERROR
+    message: subprocess call with shell=True and a non-literal command can lead to command injection
+    metadata: {category: command-injection, cwe: "CWE-78"}
+    patterns:
+      - pattern: subprocess.$FN($CMD, ..., shell=True, ...)
+      - pattern-not: subprocess.$FN("...", ..., shell=True, ...)
+  - id: vg.python.command-injection.os-system
+    languages: [python]
+    severity: ERROR
+    message: os.system/os.popen with a non-literal command can lead to command injection
+    metadata: {category: command-injection, cwe: "CWE-78"}
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: os.popen($CMD, ...)
+      - pattern-not: os.system("...")
+      - pattern-not: os.popen("...", ...)
+  - id: vg.js.command-injection.child-process-exec
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: child_process exec with a non-literal command can lead to command injection
+    metadata: {category: command-injection, cwe: "CWE-78"}
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec($CMD, ...)
+          - pattern: $CP.execSync($CMD, ...)
+      - pattern-not: $CP.exec("...", ...)
+      - pattern-not: $CP.execSync("...", ...)
+
+  # 5. Insecure Authentication
+  - id: vg.python.insecure-auth.jwt-no-verify
+    languages: [python]
+    severity: ERROR
+    message: JWT decoded without signature verification
+    metadata: {category: insecure-auth, cwe: "CWE-347"}
+    pattern-either:
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+      - pattern: jwt.decode(..., verify=False, ...)
+  - id: vg.js.insecure-auth.jwt-none-algorithm
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: JWT verification accepts the 'none' algorithm
+    metadata: {category: insecure-auth, cwe: "CWE-347"}
+    pattern: '$JWT.verify($T, $K, {..., algorithms: [..., "none", ...], ...}, ...)'
+  - id: vg.python.insecure-auth.plaintext-password-compare
+    languages: [python]
+    severity: WARNING
+    message: Password compared directly with ==; use a password hash and constant-time check
+    metadata: {category: insecure-auth, cwe: "CWE-256"}
+    patterns:
+      - pattern: $A == $B
+      - metavariable-regex:
+          metavariable: $A
+          regex: (?i).*password.*
+
+  # 6. Weak Encryption / Cryptography
+  - id: vg.python.weak-crypto.md5-sha1
+    languages: [python]
+    severity: WARNING
+    message: MD5/SHA1 are weak hash functions and must not be used for security purposes
+    metadata: {category: weak-crypto, cwe: "CWE-327"}
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+  - id: vg.js.weak-crypto.md5-sha1
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: MD5/SHA1 are weak hash functions and must not be used for security purposes
+    metadata: {category: weak-crypto, cwe: "CWE-327"}
+    pattern-either:
+      - pattern: $C.createHash("md5")
+      - pattern: $C.createHash("sha1")
+
+  # 7. Path Traversal
+  - id: vg.python.path-traversal.open-request-data
+    languages: [python]
+    severity: ERROR
+    message: File path built from request data can lead to path traversal
+    metadata: {category: path-traversal, cwe: "CWE-22"}
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request.form.get(...)
+          - pattern: request.args[...]
+          - pattern: request.form[...]
+    pattern-sinks:
+      - pattern-either:
+          - pattern: open(...)
+          - pattern: send_file(...)
+          - pattern: os.path.join(...)
+  - id: vg.js.path-traversal.fs-request-data
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: File path built from request data can lead to path traversal
+    metadata: {category: path-traversal, cwe: "CWE-22"}
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.params
+          - pattern: $REQ.query
+          - pattern: $REQ.body
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $FS.readFile(...)
+          - pattern: $FS.readFileSync(...)
+          - pattern: $RES.sendFile(...)
+          - pattern: path.join(...)

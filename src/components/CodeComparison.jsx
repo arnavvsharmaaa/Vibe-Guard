@@ -15,14 +15,18 @@ export default function CodeComparison({ finding }) {
           Suggested Fix
         </button>
       </div>
-      <CodeViewer
-        filename={finding.file}
-        code={isFix ? finding.fixedCode : finding.code}
-        startLine={finding.startLine}
-        highlightLines={isFix ? finding.fixedHighlightLines : finding.highlightLines}
-        language={finding.language}
-        mode={isFix ? "fixed" : "vulnerable"}
-      />
+      {isFix && !finding.fixedCode ? (
+        <p className="muted">No AI-suggested fix available.</p>
+      ) : (
+        <CodeViewer
+          filename={finding.file}
+          code={isFix ? finding.fixedCode : finding.code}
+          startLine={finding.startLine}
+          highlightLines={isFix ? finding.fixedHighlightLines : finding.highlightLines}
+          language={finding.language}
+          mode={isFix ? "fixed" : "vulnerable"}
+        />
+      )}
     </div>
   );
 }

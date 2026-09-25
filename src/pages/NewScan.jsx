@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import UploadZone from "../components/UploadZone";
-import { mockUpload } from "../data/mockData";
+import { createScan, describeError } from "../services/api";
 
 export default function NewScan() {
   const navigate = useNavigate();
@@ -9,10 +9,21 @@ export default function NewScan() {
   const [projectName, setProjectName] = useState("AI-Web-App");
   const [securityRules, setSecurityRules] = useState(true);
   const [aiAnalysis, setAiAnalysis] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
 
-  function startScan() {
-    if (!file) setFile(mockUpload);
-    navigate("/scan/progress", { state: { projectName: projectName || "AI-Web-App" } });
+  async function startScan() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const scan = await createScan(file, projectName.trim());
+      navigate(`/scan/progress?scan=${encodeURIComponent(scan.scan_id)}`, {
+        state: { projectName: scan.project_name },
+      });
+    } catch (err) {
+      setError(describeError(err));
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -72,9 +83,20 @@ export default function NewScan() {
           Your source code is analyzed statically and is not executed during scanning.
         </div>
 
+        {error ? (
+          <div className="notice" role="alert" style={{ color: "var(--high-fg)" }}>
+            {error}
+          </div>
+        ) : null}
+
         <div>
-          <button className="btn btn-primary" type="button" onClick={startScan} disabled={!file && !projectName}>
-            Start Security Scan
+          <button
+            className="btn btn-primary"
+            type="button"
+            onClick={startScan}
+            disabled={submitting || !file || !projectName.trim()}
+          >
+            {submitting ? "Uploading..." : "Start Security Scan"}
           </button>
         </div>
       </div>
