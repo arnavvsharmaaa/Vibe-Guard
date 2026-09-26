@@ -1,3 +1,4 @@
+import builtins
 import json
 import os
 import re
@@ -368,6 +369,8 @@ def _ai_record(analysis: AIAnalysis | None) -> dict | None:
 class ScanRegistry:
     """Database-backed scan store. Every operation runs in its own short transaction."""
 
+    # The list() method below shadows the builtin inside this class body, so annotations use builtins.list.
+
     def __init__(self, url: str | None = None):
         self.engine = create_db_engine(url or database_url())
         self._sessions = create_session_factory(self.engine)
@@ -407,14 +410,14 @@ class ScanRegistry:
             scan = session.get(Scan, scan_id)
             return self._record(scan) if scan else None
 
-    def list(self) -> list[dict]:
+    def list(self) -> builtins.list[dict]:
         with self._sessions() as session:
             scans = session.scalars(select(Scan).order_by(Scan.created_at.desc())).all()
             return [self._record(scan) for scan in scans]
 
     # Report API reads: read-only sessions, no writes.
 
-    def list_reports(self) -> list[dict]:
+    def list_reports(self) -> builtins.list[dict]:
         with self._sessions() as session:
             scans = session.scalars(
                 select(Scan).where(Scan.status == "completed").order_by(Scan.created_at.desc())
@@ -426,7 +429,7 @@ class ScanRegistry:
             scan = session.get(Scan, scan_id, options=[selectinload(Scan.findings)])
             return _report_detail(scan) if scan else None
 
-    def get_findings(self, scan_id: str) -> list[dict]:
+    def get_findings(self, scan_id: str) -> builtins.list[dict]:
         with self._sessions() as session:
             findings = session.scalars(
                 select(Finding).where(Finding.scan_id == scan_id).order_by(Finding.id)

@@ -4,6 +4,7 @@ legacy upload route, removal of uploaded source once a scan has finished, and pi
 Groq is never called. Run from backend/: python -m unittest discover -s tests -v
 """
 
+import inspect
 import json
 import os
 import re
@@ -212,6 +213,20 @@ class SourceRemovalTests(AppTestCase):
         self.assertTrue((other_scan / "results").is_dir())
         self.assertTrue(loose_file.is_file())
         self.assertEqual(sorted(p.name for p in self.upload_dir.iterdir()), sorted(["a" * 32, "keep.txt", scan_id]))
+
+
+class AnnotationTests(unittest.TestCase):
+    def test_all_annotations_in_main_evaluate(self):
+        # Python < 3.14 evaluates annotations when main is imported; 3.14 defers them. Evaluating them here makes
+        # a name shadowed inside a class body (e.g. list[dict] after a list() method) fail on every version.
+        functions = [obj for obj in vars(main).values() if inspect.isfunction(obj) and obj.__module__ == "main"]
+        for cls in (obj for obj in vars(main).values() if inspect.isclass(obj) and obj.__module__ == "main"):
+            functions += [obj for obj in vars(cls).values() if inspect.isfunction(obj)]
+        self.assertIn(main.ScanRegistry.list_reports, functions)
+        for function in functions:
+            with self.subTest(function=function.__qualname__):
+                inspect.get_annotations(function, eval_str=True)
+        self.assertEqual(inspect.get_annotations(main.ScanRegistry.list_reports)["return"], list[dict])
 
 
 class DependencyPinTests(unittest.TestCase):
