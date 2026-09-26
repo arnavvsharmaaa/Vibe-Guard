@@ -3,14 +3,27 @@ import { useNavigate } from "react-router-dom";
 import UploadZone from "../components/UploadZone";
 import { createScan, describeError } from "../services/api";
 
+// Backend limit for project_name (MAX_PROJECT_NAME_LENGTH).
+const MAX_PROJECT_NAME_LENGTH = 100;
+
+// "my.project.zip" -> "my.project": only a final .zip (any case) is removed.
+function projectNameFromFile(name) {
+  return name.replace(/\.zip$/i, "").trim().slice(0, MAX_PROJECT_NAME_LENGTH);
+}
+
 export default function NewScan() {
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
-  const [projectName, setProjectName] = useState("AI-Web-App");
+  const [projectName, setProjectName] = useState("");
   const [securityRules, setSecurityRules] = useState(true);
   const [aiAnalysis, setAiAnalysis] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+
+  function selectFile(selected) {
+    setFile(selected);
+    setProjectName(projectNameFromFile(selected.name));
+  }
 
   async function startScan() {
     setSubmitting(true);
@@ -38,7 +51,7 @@ export default function NewScan() {
       </div>
 
       <div className="stack" style={{ maxWidth: 760 }}>
-        <UploadZone file={file} onSelect={setFile} />
+        <UploadZone file={file} onSelect={selectFile} />
 
         <div>
           <label className="form-label" htmlFor="project-name">
