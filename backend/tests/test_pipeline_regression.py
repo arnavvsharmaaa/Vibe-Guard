@@ -37,6 +37,110 @@ def h(x):
 """
 VULNERABLE_JS = "function f(req, el) { el.innerHTML = req.query.x; }\n"
 MARKER_PY = "open('PWNED_MARKER', 'w').write('executed')\n"
+# One example per vg.java.* rule, each on its own line.
+VULNERABLE_JAVA = """import java.nio.file.*;
+import java.security.MessageDigest;
+import java.sql.*;
+import javax.servlet.http.*;
+
+public class App {
+    private static final String API_KEY = "sk_live_abcdef123456";
+
+    ResultSet find(Statement stmt, String name) throws Exception {
+        return stmt.executeQuery("SELECT * FROM users WHERE name = '" + name + "'");
+    }
+
+    void run(String cmd) throws Exception {
+        Runtime.getRuntime().exec(cmd);
+    }
+
+    boolean login(String password, String input) {
+        return password.equals(input);
+    }
+
+    byte[] hash(byte[] data) throws Exception {
+        return MessageDigest.getInstance("MD5").digest(data);
+    }
+
+    void download(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+        String name = req.getParameter("file");
+        byte[] body = Files.readAllBytes(Paths.get("/srv/files/" + name));
+        resp.getOutputStream().write(body);
+    }
+
+    void greet(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+        String who = req.getParameter("name");
+        resp.getWriter().println("<h1>Hello " + who + "</h1>");
+    }
+}
+"""
+# Safe counterparts of the same APIs; none may be reported.
+SAFE_JAVA = """import java.nio.file.*;
+import java.security.MessageDigest;
+import java.sql.*;
+import javax.crypto.Cipher;
+import javax.servlet.http.*;
+
+public class Safe {
+    private static final String PASSWORD_FIELD = "";
+    private final String apiKey = System.getenv("API_KEY");
+
+    ResultSet find(Connection conn, String name) throws Exception {
+        PreparedStatement ps = conn.prepareStatement("SELECT * FROM users WHERE name = ?");
+        ps.setString(1, name);
+        return ps.executeQuery();
+    }
+
+    void list() throws Exception {
+        Runtime.getRuntime().exec("ls");
+        Runtime.getRuntime().exec(new String[]{"ls", "-la"});
+        new ProcessBuilder("git", "status").start();
+    }
+
+    boolean missing(String password) {
+        return password == null;
+    }
+
+    byte[] hash(byte[] data) throws Exception {
+        Cipher.getInstance("AES/GCM/NoPadding");
+        return MessageDigest.getInstance("SHA-256").digest(data);
+    }
+
+    void greet(HttpServletRequest req, HttpServletResponse resp) throws Exception {
+        String who = req.getParameter("name");
+        resp.getWriter().println("<h1>Hello</h1>");
+        byte[] body = Files.readAllBytes(Paths.get("/srv/files/index.html"));
+        resp.getOutputStream().write(body);
+    }
+}
+"""
+# Runtime.exec: a command made only of literals is safe; any non-literal part is reported (by line).
+JAVA_EXEC = """class Exec {
+    void safe(String[] env) throws Exception {
+        Runtime.getRuntime().exec(new String[]{"ls", "-la"});
+        Runtime.getRuntime().exec(new String[]{"ls", "-la"}, env);
+        Runtime.getRuntime().exec("ls -la");
+    }
+    void dynamic(String userInput, String userControlledCommand, String[] argv) throws Exception {
+        Runtime.getRuntime().exec(userInput);
+        Runtime.getRuntime().exec(new String[]{"sh", "-c", userInput});
+        Runtime.getRuntime().exec(new String[]{"python", userControlledCommand});
+        Runtime.getRuntime().exec(argv);
+        Runtime.getRuntime().exec(new String[]{"cat", "/data/" + userInput});
+    }
+}
+"""
+JAVA_EXEC_DYNAMIC_LINES = [8, 9, 10, 11, 12]
+# Expected Java finding per category: (line in VULNERABLE_JAVA, rule, severity, text in the snippet).
+JAVA_EXPECTED = {
+    "hardcoded-secret": (7, "vg.java.hardcoded-secret", "HIGH", 'API_KEY = "sk_live_'),
+    "sql-injection": (10, "vg.java.sql-injection.string-built-query", "HIGH", "stmt.executeQuery("),
+    "command-injection": (14, "vg.java.command-injection.runtime-exec", "HIGH", "Runtime.getRuntime().exec(cmd)"),
+    "insecure-auth": (18, "vg.java.insecure-auth.plaintext-password-compare", "MEDIUM", "password.equals(input)"),
+    "weak-crypto": (22, "vg.java.weak-crypto.weak-algorithm", "MEDIUM", 'getInstance("MD5")'),
+    "path-traversal": (27, "vg.java.path-traversal.request-data", "HIGH", "Paths.get("),
+    "xss": (33, "vg.java.xss.servlet-writer", "MEDIUM", "resp.getWriter().println("),
+}
 
 
 def zip_bytes(files: dict[str, str]) -> bytes:
@@ -111,7 +215,8 @@ class PipelineRegressionTests(unittest.TestCase):
 
     def test_mixed_scan_produces_normalized_findings(self):
         scan_id = self.create_scan("app.zip", zip_bytes({
-            "app.py": VULNERABLE_PY, "web/ui.js": VULNERABLE_JS, "setup.py": MARKER_PY, "conftest.py": MARKER_PY}))
+            "app.py": VULNERABLE_PY, "web/ui.js": VULNERABLE_JS, "src/App.java": VULNERABLE_JAVA,
+            "setup.py": MARKER_PY, "conftest.py": MARKER_PY}))
         scan = self.client.get(f"/api/scans/{scan_id}").json()
         self.assertEqual(scan["status"], "completed", scan)
 
@@ -119,11 +224,13 @@ class PipelineRegressionTests(unittest.TestCase):
         findings = normalized["findings"]
         categories = {f["category"] for f in findings}
         self.assertTrue({"sql-injection", "hardcoded-secret", "command-injection", "weak-crypto", "xss"} <= categories)
+        files = {f["file"] for f in findings}
+        self.assertTrue({"app.py", "web/ui.js", "src/App.java"} <= files)  # every language produces findings
         self.assertEqual([f["id"] for f in findings], [f"VG-{n:03d}" for n in range(1, len(findings) + 1)])
         self.assertGreater(normalized["summary"]["duplicates_merged"], 0)
         self.assertTrue(any(set(f["scanners"]) == {"semgrep", "bandit"} for f in findings))
         self.assertTrue(all(f["severity"] in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} for f in findings))
-        xss = next(f for f in findings if f["category"] == "xss")
+        xss = next(f for f in findings if f["category"] == "xss" and f["file"] == "web/ui.js")
         self.assertEqual((xss["file"], xss["code"]), ("web/ui.js", VULNERABLE_JS.strip()))
         sqli = next(f for f in findings if f["category"] == "sql-injection")
         self.assertIn("cur.execute(", sqli["code"])
@@ -157,6 +264,37 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual((self.score(scan_id)["score"], self.score(scan_id)["label"]), (100, "Strong"))
         self.assertEqual((self.ai(scan_id)["status"], self.ai(scan_id)["analyses"]), ("disabled", []))
         self.assertEqual(self.opener.calls, [])
+
+    def test_java_scan_produces_normalized_findings(self):
+        scan_id = self.create_scan("java.zip", zip_bytes({"src/App.java": VULNERABLE_JAVA, "src/Safe.java": SAFE_JAVA}))
+        self.assertEqual(self.client.get(f"/api/scans/{scan_id}/status").json()["status"], "completed")
+        normalized = self.findings(scan_id)
+        findings = normalized["findings"]
+
+        self.assertEqual({f["file"] for f in findings}, {"src/App.java"})  # Safe.java produces nothing
+        self.assertEqual(len(findings), len(JAVA_EXPECTED))
+        self.assertEqual(normalized["summary"]["by_scanner"], {"bandit": 0, "semgrep": len(JAVA_EXPECTED)})
+        by_category = {f["category"]: f for f in findings}
+        self.assertEqual(set(by_category), set(JAVA_EXPECTED))  # all seven categories
+        for category, (line, rule, severity, snippet) in JAVA_EXPECTED.items():
+            with self.subTest(category=category):
+                finding = by_category[category]
+                self.assertEqual((finding["line"], finding["rule"], finding["severity"], finding["scanners"]),
+                                 (line, rule, severity, ["semgrep"]))
+                self.assertIn(snippet, finding["code"])
+                self.assertEqual(finding["code"].splitlines()[0], VULNERABLE_JAVA.splitlines()[line - 1])
+
+        self.assertEqual(self.score(scan_id), calculate_security_score(normalized))
+        dumped = json.dumps(normalized)
+        self.assertNotIn("semgrep_rules", dumped)
+        self.assertNotIn(str(self.upload_dir), dumped)
+
+    def test_java_runtime_exec_reports_only_non_literal_commands(self):
+        scan_id = self.create_scan("Exec.java", JAVA_EXEC.encode())
+        findings = self.findings(scan_id)["findings"]
+        self.assertEqual({f["rule"] for f in findings}, {"vg.java.command-injection.runtime-exec"})
+        self.assertEqual(sorted(f["line"] for f in findings), JAVA_EXEC_DYNAMIC_LINES)  # literal arrays stay clean
+        self.assertTrue(all(f["category"] == "command-injection" and f["severity"] == "HIGH" for f in findings))
 
     def test_mocked_ai_analysis_is_advisory_only(self):
         # The fake model tries to talk the score down to nothing; it must have no effect.

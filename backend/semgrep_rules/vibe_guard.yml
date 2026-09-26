@@ -1,5 +1,6 @@
 # Vibe Guard local Semgrep ruleset (Phase 5).
 # Minimal, demonstrable rules for the seven Blueprint categories. Not exhaustive.
+# Languages: Python, JavaScript/TypeScript and Java (vg.java.* rules).
 rules:
   # 1. SQL Injection
   - id: vg.python.sql-injection.string-built-query
@@ -20,6 +21,18 @@ rules:
     pattern-either:
       - pattern: $DB.query("..." + $X, ...)
       - pattern: $DB.query(`...${$X}...`, ...)
+  - id: vg.java.sql-injection.string-built-query
+    languages: [java]
+    severity: ERROR
+    message: SQL query built with concatenation or String.format is passed to a JDBC execute/prepare call
+    metadata: {category: sql-injection, cwe: "CWE-89"}
+    patterns:
+      - pattern-either:
+          - pattern: $S.$METHOD("..." + ..., ...)
+          - pattern: $S.$METHOD(String.format(...), ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(executeQuery|execute|executeUpdate|executeLargeUpdate|addBatch|prepareStatement|prepareCall)$
 
   # 2. Cross-Site Scripting
   - id: vg.js.xss.inner-html
@@ -50,6 +63,20 @@ rules:
           - pattern: mark_safe($X)
       - pattern-not: Markup("...")
       - pattern-not: mark_safe("...")
+  - id: vg.java.xss.servlet-writer
+    languages: [java]
+    severity: WARNING
+    message: Request data written to the servlet response without encoding can lead to XSS
+    metadata: {category: xss, cwe: "CWE-79"}
+    mode: taint
+    pattern-sources:
+      - pattern: $REQ.getParameter(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $RESP.getWriter().$M(...)
+          - metavariable-regex:
+              metavariable: $M
+              regex: ^(print|println|printf|format|write|append)$
 
   # 3. Hardcoded passwords / API keys / secrets
   - id: vg.generic.hardcoded-secret
@@ -59,6 +86,21 @@ rules:
     metadata: {category: hardcoded-secret, cwe: "CWE-798"}
     patterns:
       - pattern: $NAME = "$VALUE"
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(password|passwd|secret|api_?key|access_?token|private_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: .{6,}
+  - id: vg.java.hardcoded-secret
+    languages: [java]
+    severity: ERROR
+    message: Hardcoded credential assigned to a variable
+    metadata: {category: hardcoded-secret, cwe: "CWE-798"}
+    patterns:
+      - pattern-either:
+          - pattern: $TYPE $NAME = "$VALUE";
+          - pattern: $NAME = "$VALUE";
       - metavariable-regex:
           metavariable: $NAME
           regex: (?i).*(password|passwd|secret|api_?key|access_?token|private_?key).*
@@ -97,6 +139,33 @@ rules:
           - pattern: $CP.execSync($CMD, ...)
       - pattern-not: $CP.exec("...", ...)
       - pattern-not: $CP.execSync("...", ...)
+  - id: vg.java.command-injection.runtime-exec
+    languages: [java]
+    severity: ERROR
+    message: Runtime.exec or a shell ProcessBuilder with a non-literal command can lead to command injection
+    metadata: {category: command-injection, cwe: "CWE-78"}
+    pattern-either:
+      - patterns:
+          - pattern: Runtime.getRuntime().exec($CMD, ...)
+          - pattern-not: Runtime.getRuntime().exec("...", ...)
+          - pattern-not: Runtime.getRuntime().exec(new String[] {...}, ...)
+      # An inline String[] is reported only when at least one element is not a string literal.
+      - patterns:
+          - pattern: Runtime.getRuntime().exec(new String[] {..., $ARG, ...}, ...)
+          - metavariable-pattern:
+              metavariable: $ARG
+              patterns:
+                - pattern: $X
+                - pattern-not: '"..."'
+      - patterns:
+          - pattern: new ProcessBuilder($SHELL, $FLAG, $CMD, ...)
+          - pattern-not: new ProcessBuilder($SHELL, $FLAG, "...", ...)
+          - metavariable-regex:
+              metavariable: $SHELL
+              regex: ^"(\S*/)?(sh|bash|zsh|cmd|cmd\.exe|powershell|powershell\.exe)"$
+          - metavariable-regex:
+              metavariable: $FLAG
+              regex: ^"(-c|/c|/C|-Command)"$
 
   # 5. Insecure Authentication
   - id: vg.python.insecure-auth.jwt-no-verify
@@ -123,6 +192,19 @@ rules:
       - metavariable-regex:
           metavariable: $A
           regex: (?i).*password.*
+  - id: vg.java.insecure-auth.plaintext-password-compare
+    languages: [java]
+    severity: WARNING
+    message: Password compared directly with equals() or ==; use a password hash and constant-time check
+    metadata: {category: insecure-auth, cwe: "CWE-256"}
+    patterns:
+      - pattern-either:
+          - pattern: $A.equals($B)
+          - pattern: $A == $B
+      - pattern-not: $A == null
+      - metavariable-regex:
+          metavariable: $A
+          regex: (?i).*password.*
 
   # 6. Weak Encryption / Cryptography
   - id: vg.python.weak-crypto.md5-sha1
@@ -141,6 +223,22 @@ rules:
     pattern-either:
       - pattern: $C.createHash("md5")
       - pattern: $C.createHash("sha1")
+  - id: vg.java.weak-crypto.weak-algorithm
+    languages: [java]
+    severity: WARNING
+    message: MD5/SHA-1 hashes and DES/3DES/RC2/RC4/ECB ciphers are weak and must not be used for security purposes
+    metadata: {category: weak-crypto, cwe: "CWE-327"}
+    pattern-either:
+      - patterns:
+          - pattern: MessageDigest.getInstance("$ALG", ...)
+          - metavariable-regex:
+              metavariable: $ALG
+              regex: (?i)^(md2|md4|md5|sha|sha-?1)$
+      - patterns:
+          - pattern: Cipher.getInstance("$ALG", ...)
+          - metavariable-regex:
+              metavariable: $ALG
+              regex: (?i)^((des|desede|tripledes|rc2|rc4|arcfour)(/.*)?|.*/ecb/.*)$
 
   # 7. Path Traversal
   - id: vg.python.path-traversal.open-request-data
@@ -177,3 +275,19 @@ rules:
           - pattern: $FS.readFileSync(...)
           - pattern: $RES.sendFile(...)
           - pattern: path.join(...)
+  - id: vg.java.path-traversal.request-data
+    languages: [java]
+    severity: ERROR
+    message: File path built from request data can lead to path traversal
+    metadata: {category: path-traversal, cwe: "CWE-22"}
+    mode: taint
+    pattern-sources:
+      - pattern: $REQ.getParameter(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: new File(...)
+          - pattern: new FileInputStream(...)
+          - pattern: new FileOutputStream(...)
+          - pattern: new FileReader(...)
+          - pattern: Paths.get(...)
+          - pattern: Path.of(...)

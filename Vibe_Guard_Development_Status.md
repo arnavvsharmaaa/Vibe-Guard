@@ -172,6 +172,55 @@ Blueprint Phase 13 and Phase 14 remain NOT STARTED.
 
 # Phase Completion Log
 
+## Post-Phase 12 fix — Java static-analysis coverage
+
+Status: ✅ COMPLETE (scoped coverage fix; not a new phase. Blueprint Phases 13 and 14 remain NOT STARTED)
+
+Completed:
+`2026-09-26`
+
+Problem:
+- A mixed Python/JavaScript/Java upload produced no Java findings. `.java` was already accepted for upload and passed to Semgrep, but no rule in `backend/semgrep_rules/vibe_guard.yml` listed `java` in `languages:`, so Semgrep matched nothing in Java files
+- The scanner invocation, normalization, scoring, database, API and AI analysis are language-independent and were not changed
+
+Change:
+- `backend/semgrep_rules/vibe_guard.yml`: added 7 `vg.java.*` rules (Semgrep 1.178.0), one per existing category. No new category. Existing Python/JS rules unchanged
+
+| Category | Rule | Detects | Severity |
+|---|---|---|---|
+| SQL Injection | `vg.java.sql-injection.string-built-query` | `executeQuery`/`execute`/`executeUpdate`/`executeLargeUpdate`/`addBatch`/`prepareStatement`/`prepareCall` with a `"..." + …` or `String.format(...)` argument | HIGH |
+| Command Injection | `vg.java.command-injection.runtime-exec` | `Runtime.getRuntime().exec(<non-literal>)`; `new ProcessBuilder("sh"/"bash"/"cmd"/…, "-c"/"/c", <non-literal>)` | HIGH |
+| Hardcoded Secret | `vg.java.hardcoded-secret` | field/local declaration or assignment of a 6+ character string literal to a name containing password/passwd/secret/api_key/access_token/private_key | HIGH |
+| Insecure Authentication | `vg.java.insecure-auth.plaintext-password-compare` | `password.equals(x)` / `password == x` (not `== null`) | MEDIUM |
+| Weak Cryptography | `vg.java.weak-crypto.weak-algorithm` | `MessageDigest.getInstance` MD2/MD4/MD5/SHA/SHA-1; `Cipher.getInstance` DES/DESede/TripleDES/RC2/RC4/ARCFOUR or any `/ECB/` mode | MEDIUM |
+| Path Traversal | `vg.java.path-traversal.request-data` | taint: `getParameter(...)` → `new File`/`FileInputStream`/`FileOutputStream`/`FileReader`, `Paths.get`, `Path.of` | HIGH |
+| Cross-Site Scripting | `vg.java.xss.servlet-writer` | taint: `getParameter(...)` → `resp.getWriter().print/println/printf/format/write/append(...)` | MEDIUM |
+
+Tests (`backend/tests/test_pipeline_regression.py`, real Semgrep):
+- New `test_java_scan_produces_normalized_findings`: ZIP with `src/App.java` (one example per rule) and `src/Safe.java` (parameterized query, literal `exec`, non-shell `ProcessBuilder`, SHA-256, AES/GCM, empty/env-sourced secrets, `password == null`, request data not reaching a sink). Asserts exactly 7 findings, all in `App.java`, one per category, with the expected line, rule, severity, `scanners == ["semgrep"]` and snippet; `Safe.java` produces nothing; score equals `calculate_security_score(findings.json)`; no `semgrep_rules` or upload path in the output
+- `test_mixed_scan_produces_normalized_findings`: the ZIP now also contains `src/App.java`; asserts `app.py`, `web/ui.js` and `src/App.java` all produce findings. The XSS snippet check now selects the `web/ui.js` finding explicitly (the Java XSS finding sorts first)
+- Both tests fail against the previous ruleset (checked by pointing `scanners.RULES_PATH` at the HEAD version) and pass with the new one
+- New `test_java_runtime_exec_reports_only_non_literal_commands`: `Exec.java` with literal-only commands (`new String[]{"ls", "-la"}`, the same with an `env` argument, `"ls -la"`) and dynamic ones (`exec(userInput)`, `new String[]{"sh", "-c", userInput}`, `new String[]{"python", userControlledCommand}`, a `String[]` variable, a concatenated element). Asserts only the 5 dynamic lines are reported, all `vg.java.command-injection.runtime-exec`, HIGH. It failed before the false-positive fix (literal-array lines were reported) and passes after it
+
+Results:
+- `semgrep scan --validate`: 0 configuration errors, 23 rules
+- Backend: 201 run, all passed, 1 skipped (the existing Windows symlink test)
+- `npm run build` → passed
+- Live (uvicorn, scratch `DATABASE_URL`, `GROQ_API_KEY` unset): mixed `app.py` + `web/ui.js` + `src/App.java` ZIP → `completed`, score 33 "At risk", 13 findings, 7 of them in `src/App.java` covering all 7 categories, AI `disabled`. `/api/scans`, `/api/scans/{id}`, `/api/reports`, `/api/reports/{id}`, `/api/reports/{id}/findings` and `/api/findings/{id}` contain no server/upload/scratch paths, `semgrep_rules`, `scanner_metadata`, `check_id`, `stderr` or `gsk_`. The live scan directory was removed afterwards
+
+Java limitations (pattern-based, not exhaustive):
+- SQL: a query string built in a separate variable before the call is not detected
+- Command: `Runtime` stored in a variable is not detected. An inline `exec(new String[]{...})` is reported only when an element is not a string literal (fixed after the first review: `new String[]{"ls", "-la"}` was a false positive; covered by `test_java_runtime_exec_reports_only_non_literal_commands`). A `String[]` held in a variable is always reported, since its contents are not tracked
+- Taint rules (path traversal, XSS) only use Servlet `getParameter(...)` as a source; Spring `@RequestParam`/`@PathVariable`, headers, cookies and request bodies are not sources. XSS only covers a direct `resp.getWriter().<method>(...)` chain, not a `PrintWriter` stored in a variable, JSP or template engines
+- No Java JWT/session rules; insecure authentication is limited to plaintext password comparison
+- Bandit remains Python-only; Java findings come from Semgrep alone
+- The frontend shows Java snippets without syntax highlighting (`language` maps to `text`); frontend unchanged by design
+
+Files changed:
+- `backend/semgrep_rules/vibe_guard.yml`
+- `backend/tests/test_pipeline_regression.py`
+- `Vibe_Guard_Development_Status.md`
+
 ## Phase 12
 
 Status: ✅ COMPLETE (final testing and security-hardening validation of the existing implementation)
