@@ -284,8 +284,11 @@ class ReportPipelineTests(ReportTestCase):
         return response.json()["scan_id"]
 
     def test_report_matches_result_files(self):
-        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}):
+        # source/ cleanup is held back so the PWNED_MARKER check below also covers the scanners' working directory.
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}), \
+                mock.patch.object(main, "_remove_source") as remove_source:
             scan_id = self.mixed_scan()
+        remove_source.assert_called_once_with(self.upload_dir / scan_id)
         normalized, score, ai = (self.result(scan_id, n) for n in ("findings.json", "score.json", "ai_analysis.json"))
         self.assertGreater(len(self.opener.calls), 0)
 

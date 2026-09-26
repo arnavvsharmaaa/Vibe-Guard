@@ -248,7 +248,10 @@ class UploadedCodeIsNeverRunTests(AppTestCase):
             ".semgrepignore": "*\n",
             ".bandit": "[bandit]\nskips: B602\n",
         }
-        scan_id = self.create_scan("p.zip", zip_bytes(marker_payloads))
+        # source/ cleanup is held back so the scanners' working directory is still checked for the marker.
+        with mock.patch.object(main, "_remove_source") as remove_source:
+            scan_id = self.create_scan("p.zip", zip_bytes(marker_payloads))
+        remove_source.assert_called_once_with(self.upload_dir / scan_id)
         scan = self.client.get(f"/api/scans/{scan_id}").json()
         self.assertEqual(scan["status"], "completed", scan)
         source = self.upload_dir / scan_id / "source"

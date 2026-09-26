@@ -214,9 +214,12 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual(list(self.upload_dir.iterdir()), [])
 
     def test_mixed_scan_produces_normalized_findings(self):
-        scan_id = self.create_scan("app.zip", zip_bytes({
-            "app.py": VULNERABLE_PY, "web/ui.js": VULNERABLE_JS, "src/App.java": VULNERABLE_JAVA,
-            "setup.py": MARKER_PY, "conftest.py": MARKER_PY}))
+        # source/ cleanup is held back so the PWNED_MARKER check below also covers the scanners' working directory.
+        with mock.patch.object(main, "_remove_source") as remove_source:
+            scan_id = self.create_scan("app.zip", zip_bytes({
+                "app.py": VULNERABLE_PY, "web/ui.js": VULNERABLE_JS, "src/App.java": VULNERABLE_JAVA,
+                "setup.py": MARKER_PY, "conftest.py": MARKER_PY}))
+        remove_source.assert_called_once_with(self.upload_dir / scan_id)
         scan = self.client.get(f"/api/scans/{scan_id}").json()
         self.assertEqual(scan["status"], "completed", scan)
 
@@ -308,9 +311,11 @@ class PipelineRegressionTests(unittest.TestCase):
             scanner_envs.append(env)
             return env
 
-        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}),                 mock.patch.object(scanners, "_scanner_env", side_effect=capture_env):
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}),                 mock.patch.object(scanners, "_scanner_env", side_effect=capture_env), \
+                mock.patch.object(main, "_remove_source") as remove_source:  # keep source/ for the PWNED_MARKER check
             scan_id = self.create_scan("app.zip", zip_bytes({
                 "app.py": VULNERABLE_PY, "web/ui.js": VULNERABLE_JS, "setup.py": MARKER_PY, "conftest.py": MARKER_PY}))
+        remove_source.assert_called_once_with(self.upload_dir / scan_id)
         scan = self.client.get(f"/api/scans/{scan_id}").json()
         self.assertEqual(scan["status"], "completed", scan)
 

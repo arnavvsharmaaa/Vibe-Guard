@@ -336,8 +336,11 @@ class PipelinePersistenceTests(DatabaseTestCase):
     def test_completed_scan_matches_result_files(self):
         self.opener.handler = lambda request, timeout: groq_body(json.dumps(valid_output(
             request_payload(request)["finding_id"], explanation="severity LOW. score 100.")))
-        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}):
+        # source/ cleanup is held back so the PWNED_MARKER check below also covers the scanners' working directory.
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}), \
+                mock.patch.object(main, "_remove_source") as remove_source:
             scan_id = self.mixed_scan()
+        remove_source.assert_called_once_with(self.upload_dir / scan_id)
         normalized, score, ai = (self.result(scan_id, n) for n in ("findings.json", "score.json", "ai_analysis.json"))
 
         scan = self.client.get(f"/api/scans/{scan_id}").json()

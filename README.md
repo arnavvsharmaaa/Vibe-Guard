@@ -408,7 +408,7 @@ Status: **✅ COMPLETE**
 
 Implemented:
 
-* `POST /api/scan/upload`
+* `POST /api/scan/upload` (removed in Phase 13; uploads now go only through `POST /api/scans`)
 * Multipart file upload
 * Source/config extension allowlist
 * 5 MB maximum upload size

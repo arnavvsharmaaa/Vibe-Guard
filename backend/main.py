@@ -63,7 +63,7 @@ ALLOWED_EXTENSIONS = {
 }
 
 # Endpoints that accept multipart uploads
-UPLOAD_PATHS = {"/api/scan/upload", "/api/scans"}
+UPLOAD_PATHS = {"/api/scans"}
 
 # Scan lifecycle
 SCAN_STATUSES = ("uploaded", "queued", "scanning", "analyzing", "completed", "failed")
@@ -84,6 +84,10 @@ SCAN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 FINDING_REF_PATTERN = re.compile(r"([0-9a-f]{32}):(VG-[0-9]{3,})")
 MAX_PROJECT_NAME_LENGTH = 100
 
+# The API has no authentication, so it listens on localhost unless HOST is set explicitly
+# (e.g. HOST=0.0.0.0 inside a deployment/container boundary).
+DEFAULT_HOST = "127.0.0.1"
+
 # CORS configuration to allow local React development server
 origins = [
     "http://localhost:5173",
@@ -96,11 +100,12 @@ extra_origins = os.getenv("ALLOWED_ORIGINS")
 if extra_origins:
     origins.extend([origin.strip() for origin in extra_origins.split(",") if origin.strip()])
 
+# The frontend sends no cookies or credentials and only uses GET and POST.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -287,15 +292,6 @@ async def _store_upload(file: UploadFile) -> dict:
         "filename": safe_basename,
         "file_count": file_count,
     }
-
-
-@app.post("/api/scan/upload", tags=["Scan"])
-async def upload_code_file(file: UploadFile = File(...)):
-    """
-    Accepts a source-code file or ZIP archive and stores it in an isolated scan directory.
-    Validates type and size, extracts archives safely, and never executes uploaded code.
-    """
-    return await _store_upload(file)
 
 
 class InvalidScanTransition(Exception):
@@ -554,6 +550,16 @@ def _run_scan_pipeline(scan_id: str) -> None:
             scan_registry.transition(scan_id, "failed", error=f"{stage} failed unexpectedly")
         except (KeyError, InvalidScanTransition):
             pass
+    finally:
+        _remove_source(scan_dir)
+
+
+def _remove_source(scan_dir: Path) -> None:
+    """
+    The pipeline is the only reader of the uploaded source. Once it has finished (completed or failed),
+    reports are served from the database, so only source/ is removed; results/ is kept.
+    """
+    shutil.rmtree(scan_dir / "source", ignore_errors=True)
 
 
 def _validate_project_name(project_name: str) -> str:
@@ -656,6 +662,6 @@ def get_finding(finding_id: str):
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")
+    host = os.getenv("HOST", DEFAULT_HOST)
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host=host, port=port, reload=True)

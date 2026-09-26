@@ -24,8 +24,11 @@ pip install -r requirements.txt
 \\\ash
 python main.py
 # or
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 \\\
+
+The API has no authentication, so it listens on `127.0.0.1` only (`HOST` in the environment; default `127.0.0.1`).
+Set `HOST=0.0.0.0` only inside a deployment/container boundary, never on a shared network.
 
 ### 4. Endpoints
 - Health check: \GET http://localhost:8000/api/health\

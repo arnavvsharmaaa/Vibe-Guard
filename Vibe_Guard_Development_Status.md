@@ -40,7 +40,7 @@ Do not redesign or rebuild the frontend unless explicitly instructed.
 | Phase 10 — Report API | ✅ COMPLETE | Yes |
 | Phase 11 — Replace Frontend Mock Data | ✅ COMPLETE | Yes |
 | Phase 12 — Testing (final testing & hardening validation) | ✅ COMPLETE | Yes |
-| Phase 13 — Security Hardening | ⏳ NOT STARTED (checklist reviewed within Phase 12) | No |
+| Phase 13 — Security Hardening | ✅ COMPLETE | Yes |
 | Phase 14 — Docker / Deployment | ⏳ NOT STARTED | No |
 
 ---
@@ -163,14 +163,107 @@ Known remaining issues:
 
 # Current Authorized Phase
 
-## Phase 12 — Testing
+## Phase 13 — Security Hardening
 
-Status: ✅ COMPLETE. Phase 12 is the final phase of the current development plan; no further phase is authorized.
-Blueprint Phase 13 and Phase 14 remain NOT STARTED.
+Status: ✅ COMPLETE. No further phase is authorized.
+Blueprint Phase 14 (Docker / Deployment) remains NOT STARTED.
 
 ---
 
 # Phase Completion Log
+
+## Phase 13
+
+Status: ✅ COMPLETE
+
+Completed:
+`2026-09-26`
+
+Scope: the Blueprint Phase 13 review list, compared with the implementation at `7b31ca0`. Only items with a Blueprint requirement or a concrete defect were changed. No Docker/deployment, authentication, rate limiting, Host allowlist or TLS work (all Phase 14). `Blueprint.md` unchanged; no frontend change.
+
+Review of the Blueprint Phase 13 items:
+
+| Item | Result |
+|---|---|
+| Upload limits | Already satisfied (5 MB by `Content-Length` and by received bytes, extension allowlist, `project_name` validation). Legacy upload route removed (R3) |
+| Archive extraction | Already satisfied (encrypted/symlink entries rejected, real decompressed bytes counted, corrupt archives → 400) |
+| Path traversal | Already satisfied (`..`, absolute paths and `:` rejected, resolved-path containment, basename-only filenames, normalization path checks) |
+| Oversized files | Already satisfied (5 MB upload, 50 MB extracted, 1 MB Semgrep target, snippet caps) |
+| Excessive file counts | Already satisfied (1000 entries, Bandit batching) |
+| Environment secrets | Already satisfied (`GROQ_API_KEY` read at call time, only in the `Authorization` header; allowlisted scanner environment; `.env`/`*.db` ignored) |
+| CORS | Implemented: credentials off, methods limited to GET/POST (R2) |
+| Error leakage | Already satisfied (fixed-text errors, no debug output, AI errors are fixed strings + HTTP code) |
+| Temporary files | Implemented: uploaded `source/` removed when a scan finishes (R4); legacy route that left unscanned uploads removed (R3) |
+| AI input handling | Already satisfied (untrusted data only in the JSON user message, redaction, fixed URL, no redirects, 256 KB cap, timeouts, strict output validation, advisory only) |
+| Database access | Already satisfied (ORM/parameterized, validated IDs, read-only report sessions, atomic `complete()`) |
+| Logging | Already satisfied (no application logging; access log has paths only; scanner stderr stays in `results/`; no secrets logged) |
+| Dependency security | Implemented: runtime requirements pinned to the audited versions (R5) |
+
+Changes:
+- R1 — Localhost by default: `main.DEFAULT_HOST = "127.0.0.1"`; `python main.py` uses it unless `HOST` is set, so `HOST=0.0.0.0` still works for a container. `backend/.env.example` now has `HOST=127.0.0.1`; `backend/README.md` runs `uvicorn ... --host 127.0.0.1` and explains `HOST`
+- R2 — CORS: `allow_credentials=False` (the frontend sends no cookies or credentials), `allow_methods=["GET", "POST"]`. The explicit origin list and `ALLOWED_ORIGINS` are unchanged; no wildcard
+- R3 — Removed `POST /api/scan/upload` (unused since Phase 11, untested, and it stored up to 50 MB per request with no scan record or cleanup). `UPLOAD_PATHS` is now `{"/api/scans"}`; `_store_upload` is unchanged and still used by `POST /api/scans`. `README.md` marks the endpoint as removed
+- R4 — `_run_scan_pipeline` calls `_remove_source(scan_dir)` in `finally`, after static analysis, normalization, scoring, AI analysis and persistence have finished, whether the scan completed or failed. Only `uploads/{scan_id}/source/` is removed; `results/` and the database are kept. Reports and finding snippets are served from the database, so they are unchanged
+- R5 — `backend/requirements.txt`: `fastapi==0.141.1`, `uvicorn==0.52.4`, `python-multipart==0.0.32` (previously `>=` ranges). Bandit, Semgrep and SQLAlchemy pins unchanged
+
+Dependency audit (2026-09-26):
+- `npm audit` (package-lock): 0 vulnerabilities
+- OSV batch query of all 75 packages installed in `backend/venv`: no known vulnerabilities in any runtime package. The only hits are in `pip` 26.0.1 itself (local venv tooling, not a runtime dependency; not changed by this repository)
+
+Corrected API exposure statement: there is no authentication, and `GET /api/scans` / `GET /api/reports` list every scan, so anyone who can reach the API can read every report, finding and code snippet. The earlier wording "anyone who knows a scan ID" (Phase 10) was corrected. Default binding to `127.0.0.1` limits this to the local machine.
+
+Tests:
+- New `backend/tests/test_phase13_hardening.py` (17 tests):
+  - Host: `main.py` run as a script (uvicorn mocked) binds `127.0.0.1` by default and `0.0.0.0` when `HOST=0.0.0.0`; `.env.example` and `backend/README.md` have no `0.0.0.0` default
+  - CORS: allowed-origin POST preflight → 200 with that origin, methods exactly GET/POST, no `Access-Control-Allow-Credentials`; DELETE/PUT/PATCH preflight → 400; disallowed origin → no `Access-Control-Allow-Origin` (preflight and GET); allowed GET on `/api/health`, `/api/scans`, `/api/reports` → allow-origin, no credentials header; no `*` origin
+  - Legacy route: not in the app routes or `UPLOAD_PATHS`; POSTing a ZIP or a `.py` → 404/405, nothing written to `uploads/`, no scan registered; `POST /api/scans` still stores uploads
+  - Source removal: completed scan → `source/` gone, all result files kept; the same upload with and without removal gives identical report, findings (including `code`) and finding details, and the same score (equal to `calculate_security_score(findings.json)`); `source/` still present when static analysis and AI analysis run; scanner failure, scanner crash, normalization crash and persistence crash → `failed` and `source/` gone, scan directory kept; AI crash → `completed` and `source/` gone; another scan's `source/`, `results/` and a loose file in `uploads/` untouched
+  - Dependencies: every `requirements.txt` line is pinned with `==` and equals the installed version
+- Adapted marker checks (coverage kept): `test_phase12_hardening` (`test_suspicious_sources_are_scanned_not_run`), `test_pipeline_regression` (mixed and mocked-AI scans), `test_database` (`test_completed_scan_matches_result_files`) and `test_reports` (`test_report_matches_result_files`) hold back `_remove_source` while scanning, assert it was called for that scan, and keep checking `source/` (the scanners' working directory) for `PWNED_MARKER`. Without this, a marker written there would be deleted with `source/` and the checks would pass vacuously
+
+Results:
+- Backend: 218 run, all passed, 1 skipped (the existing Windows symlink test)
+- `npm run build` → passed
+- `semgrep scan --validate`: 0 configuration errors, 23 rules
+- Live (`python main.py` with `HOST` unset, scratch `DATABASE_URL`, `GROQ_API_KEY` unset; Vite on 5173; Chrome):
+  - Listening on `127.0.0.1:8000` only; the LAN address refused the connection
+  - curl: POST preflight → 200, `GET, POST`, no credentials header; DELETE preflight → 400; disallowed-origin preflight → 400 without allow-origin; disallowed-origin GET → no allow-origin; allowed GET → allow-origin
+  - `POST /api/scan/upload` → 404 and no new directory in `uploads/`
+  - UI upload of a Python/JavaScript/Java ZIP from the New Scan page (project name derived from the file) → progress → completed, score 33 "At risk", 13 findings (7 Java), AI `disabled`; report page and a Java finding detail page rendered with snippets; no CORS or fetch errors in the console
+  - After completion `uploads/{scan_id}/` held only `results/`; other upload directories unchanged
+  - `/api/scans`, `/api/scans/{id}`, `/api/reports`, `/api/reports/{id}`, `/api/reports/{id}/findings` and three `/api/findings/{id}` responses contain no server/upload paths, `source/`, `semgrep_rules`, `scanner_metadata`, `check_id`, `stderr` or `gsk_`
+  - The live scan directory was removed afterwards; both dev servers were stopped
+  - A failed scan was verified by tests only (no way to force a scanner failure live without changing code)
+
+Invariants unchanged: uploaded code is never executed or imported; scanner isolation (`shell=False`, allowlisted environment, `--` before paths, timeouts); deterministic findings and scoring; AI advisory only and unable to change findings or score; the seven categories; no frontend change.
+
+Known limitations:
+- A scan interrupted by a server stop stays in `scanning`/`analyzing` and keeps its `source/`; there is no restart recovery
+- `results/` (including `findings.json` snippets and raw scanner JSON) is kept with no retention period; the database keeps findings and snippets indefinitely
+- `allow_headers` is still `["*"]` (the frontend sends only CORS-safelisted headers); left unchanged as it grants no additional capability without credentials
+
+Phase 14 must address (out of scope here):
+- Authentication or network isolation before any non-local exposure (the API has none and lists every scan)
+- TLS
+- Rate limits and disk quotas for uploads and scans
+- `/docs` and `/openapi.json` exposure
+- Production CORS: the local development origins are always included; set production origins through `ALLOWED_ORIGINS` and remove the dev defaults
+- A Host allowlist (DNS rebinding protection for a locally bound API)
+- Scanner CPU/memory limits (only time limits exist)
+- `HOST=0.0.0.0` only inside the container/deployment boundary
+
+Files changed:
+- `backend/main.py`
+- `backend/requirements.txt`
+- `backend/.env.example`
+- `backend/README.md`
+- `README.md`
+- `backend/tests/test_phase13_hardening.py` (new)
+- `backend/tests/test_phase12_hardening.py`
+- `backend/tests/test_pipeline_regression.py`
+- `backend/tests/test_database.py`
+- `backend/tests/test_reports.py`
+- `Vibe_Guard_Development_Status.md`
 
 ## Post-Phase 12 fix — Java static-analysis coverage
 
@@ -397,7 +490,7 @@ Issues / notes:
 - The Blueprint's `/api/findings/{finding_id}` path takes the composite ID, not a bare `VG-001`
 - `detection_reason` (stored since Phase 8) is exposed although not listed in the Blueprint AI model
 - `GET /api/reports` loads every completed scan's findings (one extra query); fine for SQLite scale, no pagination
-- No authentication: anyone who knows a scan ID can read its report (scan IDs are random 128-bit). Access control is outside Phase 10
+- No authentication: anyone who can reach the API can list every scan (`GET /api/scans`, `GET /api/reports`) and read every report, finding and code snippet; random scan IDs do not restrict access because they are listed. Access control is outside Phase 10 (corrected in Phase 13; the API now listens on `127.0.0.1` by default)
 - AI text and `fixed_code` must be rendered as plain text by the frontend (Phase 11)
 
 
