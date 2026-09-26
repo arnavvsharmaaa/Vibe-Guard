@@ -14,12 +14,15 @@ Authorization header.
 
 import copy
 import json
+import math
 import os
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
-from time import monotonic
+from time import monotonic, sleep
 
 from normalization import _SnippetReader
 
@@ -30,9 +33,17 @@ DEFAULT_TIMEOUT_SECONDS = 30
 MAX_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_FINDINGS = 25
 MAX_MAX_FINDINGS = 100
-AI_BUDGET_SECONDS = 180  # all requests of one scan together
-MAX_COMPLETION_TOKENS = 8192
+AI_BUDGET_SECONDS = 180  # all requests of one scan together, including rate-limit waits
+# Per-finding completion budget (the model's reasoning plus the JSON answer). A typical answer is well under
+# 1,000 tokens; 2,048 leaves room for a long fixed_code while keeping each request small under per-minute
+# token limits (8,192 let a few findings exhaust an 8K tokens-per-minute limit).
+MAX_COMPLETION_TOKENS = 2048
 MAX_RESPONSE_BYTES = 256 * 1024
+
+# HTTP 429 handling: wait as the provider's Retry-After asks, a bounded number of times, inside the AI budget.
+MAX_RATE_LIMIT_RETRIES = 2  # per finding; if it still gets 429, no further requests are sent for the scan
+DEFAULT_RETRY_WAIT_SECONDS = 5  # when Retry-After is missing or unreadable
+MAX_RETRY_WAIT_SECONDS = 30  # a longer Retry-After is treated as a persistent rate limit
 
 CONTEXT_LINES = 5  # lines of context on each side of the flagged lines
 MAX_CONTEXT_LINES = 40
@@ -94,6 +105,14 @@ REDACTED = "<REDACTED>"
 
 class AIOutputError(Exception):
     pass
+
+
+class _RateLimited(Exception):
+    """The provider answered HTTP 429. `retry_after` is its Retry-After in seconds, or None."""
+
+    def __init__(self, retry_after: float | None):
+        super().__init__("rate limited")
+        self.retry_after = retry_after
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -252,12 +271,31 @@ def _entry(finding_id, status: str, fields: dict | None = None, error: str | Non
     return entry
 
 
+def _retry_after(headers) -> float | None:
+    """Retry-After as seconds (delta-seconds or an HTTP date), or None if missing or unreadable."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        try:
+            seconds = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
 def _analyze_one(finding: dict, reader: _SnippetReader, config: dict, timeout: float) -> dict:
+    """One request for one finding. Raises _RateLimited on HTTP 429; every other problem becomes an entry."""
     finding_id = finding["id"]
     try:
         content = _request_analysis(build_payload(finding, reader), config, timeout)
     except urllib.error.HTTPError as exc:
-        exc.close()
+        retry_after = _retry_after(exc.headers) if exc.code == 429 else None
+        exc.close()  # the provider's body is never kept
+        if exc.code == 429:
+            raise _RateLimited(retry_after)
         return _entry(finding_id, "failed", error=f"AI provider returned HTTP {exc.code}")
     except TimeoutError:
         return _entry(finding_id, "timeout", error="AI request timed out")
@@ -273,6 +311,26 @@ def _analyze_one(finding: dict, reader: _SnippetReader, config: dict, timeout: f
         return _entry(finding_id, "completed", validate_output(content, finding_id))
     except AIOutputError as exc:
         return _entry(finding_id, "invalid_output", error=f"AI output rejected: {exc}")
+
+
+def _analyze_with_retries(finding: dict, reader: _SnippetReader, config: dict, deadline: float) -> tuple[dict, bool]:
+    """
+    Analyzes one finding, retrying HTTP 429 at most MAX_RATE_LIMIT_RETRIES times after the provider's
+    Retry-After (or DEFAULT_RETRY_WAIT_SECONDS), never past the AI budget. Returns (entry, rate_limited):
+    rate_limited is True when the limit persisted, so no further requests should be sent for this scan.
+    """
+    for retries in range(MAX_RATE_LIMIT_RETRIES + 1):
+        remaining = deadline - monotonic()
+        try:
+            return _analyze_one(finding, reader, config, min(config["timeout"], remaining)), False
+        except _RateLimited as limited:
+            wait = DEFAULT_RETRY_WAIT_SECONDS if limited.retry_after is None else limited.retry_after
+            if (retries == MAX_RATE_LIMIT_RETRIES or wait > MAX_RETRY_WAIT_SECONDS
+                    or deadline - monotonic() - wait < 1):
+                error = f"AI provider returned HTTP 429 (rate limited; gave up after {retries} " \
+                        f"{'retry' if retries == 1 else 'retries'})"
+                return _entry(finding["id"], "failed", error=error), True
+            sleep(wait)
 
 
 def _result(model: str, analyses: list[dict], disabled: bool = False) -> dict:
@@ -293,8 +351,10 @@ def _result(model: str, analyses: list[dict], disabled: bool = False) -> dict:
 
 def analyze_findings(normalized: dict, source_dir: Path | None) -> dict:
     """
-    Advisory AI analysis for Phase 6 findings, in their existing severity order.
+    Advisory AI analysis for Phase 6 findings, in their existing severity order, one request per finding.
     Never raises for provider problems; every finding gets a status. The input is never modified.
+    HTTP 429 is retried a bounded number of times after Retry-After; if it persists, the finding is marked
+    failed and the remaining findings are skipped without sending further requests.
     """
     findings = copy.deepcopy(normalized["findings"])
     config = _config()
@@ -306,14 +366,18 @@ def analyze_findings(normalized: dict, source_dir: Path | None) -> dict:
     reader = _SnippetReader(source_dir.resolve() if source_dir is not None else None)
     deadline = monotonic() + AI_BUDGET_SECONDS
     analyses = []
+    rate_limited = False
     for index, finding in enumerate(findings):
         remaining = deadline - monotonic()
         if index >= config["max_findings"]:
             analyses.append(_entry(finding["id"], "skipped", error="limit reached"))
+        elif rate_limited:
+            analyses.append(_entry(finding["id"], "skipped", error="AI provider rate limit (HTTP 429); not attempted"))
         elif remaining < 1:
             analyses.append(_entry(finding["id"], "skipped", error="AI time budget exhausted"))
         else:
-            analyses.append(_analyze_one(finding, reader, config, min(config["timeout"], remaining)))
+            entry, rate_limited = _analyze_with_retries(finding, reader, config, deadline)
+            analyses.append(entry)
     return _result(config["model"], analyses)
 
 

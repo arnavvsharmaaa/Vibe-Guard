@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -353,6 +354,27 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertTrue(ai["analyses"])
         self.assertTrue(all(a["status"] == "failed" and a["explanation"] is None for a in ai["analyses"]))
         self.assertEqual(self.score(scan_id), calculate_security_score(self.findings(scan_id)))
+
+    def test_ai_rate_limit_still_completes_scan_with_same_findings_and_score(self):
+        baseline_id = self.create_scan("a.py", VULNERABLE_PY.encode())  # no key: AI disabled
+
+        def rate_limited(request, t):
+            raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", {"Retry-After": "1"},
+                                         io.BytesIO(b"rate limited"))
+        self.opener.handler = rate_limited
+        sleeps = []
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": API_KEY}), \
+                mock.patch.object(ai_analysis, "sleep", sleeps.append):
+            scan_id = self.create_scan("a.py", VULNERABLE_PY.encode())
+        scan = self.client.get(f"/api/scans/{scan_id}").json()
+        self.assertEqual((scan["status"], scan["error"]), ("completed", None))
+        ai = self.ai(scan_id)
+        self.assertEqual(len(self.opener.calls), 1 + ai_analysis.MAX_RATE_LIMIT_RETRIES)  # then no more requests
+        self.assertEqual(sleeps, [1.0] * ai_analysis.MAX_RATE_LIMIT_RETRIES)
+        self.assertEqual([a["status"] for a in ai["analyses"]], ["failed"] + ["skipped"] * (len(ai["analyses"]) - 1))
+        self.assertEqual(self.findings(scan_id)["findings"], self.findings(baseline_id)["findings"])
+        self.assertEqual(self.score(scan_id), self.score(baseline_id))
+        self.assertEqual(scan["security_score"], self.client.get(f"/api/scans/{baseline_id}").json()["security_score"])
 
     def test_ai_timeout_still_completes_scan(self):
         def timeout(request, t):

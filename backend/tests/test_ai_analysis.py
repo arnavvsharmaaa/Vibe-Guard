@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
@@ -101,8 +103,12 @@ class AIAnalysisTestBase(unittest.TestCase):
         self.opener = FakeOpener()
         self.opener_patch = mock.patch.object(ai_analysis, "_opener", self.opener)
         self.opener_patch.start()
+        self.sleeps = []  # rate-limit waits are recorded, never slept
+        self.sleep_patch = mock.patch.object(ai_analysis, "sleep", self.sleeps.append)
+        self.sleep_patch.start()
 
     def tearDown(self):
+        self.sleep_patch.stop()
         self.opener_patch.stop()
         self.env_patch.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -440,6 +446,168 @@ class FailureTests(AIAnalysisTestBase):
         self.assertEqual(ai_analysis.failed_result(None)["status"], "failed")
 
 
+PROVIDER_429_BODY = b'{"error": {"message": "Rate limit reached PROVIDER_RATE_DETAIL"}}'
+
+
+def http_429(request, retry_after=None):
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", headers, io.BytesIO(PROVIDER_429_BODY))
+
+
+def answer(request):
+    return groq_body(json.dumps(valid_output(request_payload(request)["finding_id"])))
+
+
+class TokenBudgetTests(AIAnalysisTestBase):
+    def test_bounded_max_completion_tokens_is_sent(self):
+        self.assertEqual(ai_analysis.MAX_COMPLETION_TOKENS, 2048)
+        result = self.analyze(make_finding("VG-001"), make_finding("VG-002", line=3))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([json.loads(r.data)["max_completion_tokens"] for r, _ in self.opener.calls], [2048, 2048])
+        self.assertEqual(self.sleeps, [])  # no waiting without a rate limit
+
+
+class RateLimitTests(AIAnalysisTestBase):
+    def setUp(self):
+        super().setUp()
+        # A fake clock: requests take no time, rate-limit waits advance it.
+        self.clock = [1000.0]
+        self.sleep_patch.stop()
+        self.sleep_patch = mock.patch.object(ai_analysis, "sleep", self.fake_sleep)
+        self.sleep_patch.start()
+        self.clock_patch = mock.patch.object(ai_analysis, "monotonic", lambda: self.clock[0])
+        self.clock_patch.start()
+
+    def tearDown(self):
+        self.clock_patch.stop()
+        super().tearDown()
+
+    def fake_sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.clock[0] += seconds
+
+    def respond(self, *outcomes):
+        """Each call consumes the next outcome: None → valid answer, ("429", retry_after) → HTTP 429."""
+        queue = list(outcomes)
+
+        def handler(request, timeout):
+            outcome = queue.pop(0) if queue else None
+            if outcome is None:
+                return answer(request)
+            raise http_429(request, outcome[1])
+        self.opener.handler = handler
+
+    def statuses(self, result):
+        return [a["status"] for a in result["analyses"]]
+
+    def test_429_with_retry_after_is_retried_and_completes(self):
+        self.respond(("429", "3"))
+        result = self.analyze(make_finding("VG-001"), make_finding("VG-002", line=3))
+        self.assertEqual(self.sleeps, [3.0])
+        self.assertEqual([p["finding_id"] for p in self.sent_payloads()], ["VG-001", "VG-001", "VG-002"])
+        self.assertEqual((result["status"], self.statuses(result)), ("completed", ["completed", "completed"]))
+        self.assertEqual(result["analyses"][0]["explanation"], valid_output("VG-001")["explanation"])
+
+    def test_http_date_retry_after_is_honoured(self):
+        when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10), usegmt=True)
+        self.respond(("429", when))
+        result = self.analyze(make_finding())
+        self.assertEqual(len(self.sleeps), 1)
+        self.assertTrue(8 <= self.sleeps[0] <= 10, self.sleeps)
+        self.assertEqual(result["status"], "completed")
+
+    def test_missing_or_unreadable_retry_after_uses_bounded_default(self):
+        for retry_after in (None, "soon", "-5", "nan"):
+            with self.subTest(retry_after=retry_after):
+                self.sleeps.clear()
+                self.opener.calls.clear()
+                self.respond(("429", retry_after))
+                result = self.analyze(make_finding())
+                expected = [0.0] if retry_after == "-5" else [ai_analysis.DEFAULT_RETRY_WAIT_SECONDS]
+                self.assertEqual(self.sleeps, expected)
+                self.assertEqual(result["status"], "completed")
+
+    def test_persistent_429_stops_further_requests_and_skips_the_rest(self):
+        self.respond(*[("429", "2")] * 10)
+        normalized = {"findings": [make_finding(f"VG-00{n}", line=n) for n in range(1, 5)], "summary": {}}
+        before = copy.deepcopy(normalized)
+        result = analyze_findings(normalized, self.source)
+
+        retries = ai_analysis.MAX_RATE_LIMIT_RETRIES
+        self.assertEqual(len(self.opener.calls), retries + 1)  # only the first finding was ever sent
+        self.assertEqual({p["finding_id"] for p in self.sent_payloads()}, {"VG-001"})
+        self.assertEqual(self.sleeps, [2.0] * retries)
+        self.assertEqual(self.statuses(result), ["failed", "skipped", "skipped", "skipped"])
+        self.assertEqual(result["analyses"][0]["error"], "AI provider returned HTTP 429 (rate limited; gave up after 2 retries)")
+        for entry in result["analyses"][1:]:
+            self.assertEqual(entry["error"], "AI provider rate limit (HTTP 429); not attempted")
+        self.assertEqual((result["status"], result["analyzed"], result["failed"], result["skipped"]), ("failed", 0, 1, 3))
+        self.assertEqual(normalized, before)  # findings untouched
+
+        dumped = json.dumps(result)
+        for leaked in ("PROVIDER_RATE_DETAIL", API_KEY, "api.groq.com", "Authorization", "cur.execute"):
+            self.assertNotIn(leaked, dumped)
+
+    def test_success_before_rate_limit_is_kept(self):
+        self.respond(None, ("429", "1"), ("429", "1"), ("429", "1"))
+        result = self.analyze(*(make_finding(f"VG-00{n}", line=n) for n in range(1, 4)))
+        self.assertEqual(self.statuses(result), ["completed", "failed", "skipped"])
+        self.assertEqual((result["status"], result["analyzed"]), ("partial", 1))
+        self.assertEqual(len(self.opener.calls), 1 + 3)
+
+    def test_retry_after_longer_than_the_wait_cap_is_not_waited_for(self):
+        self.respond(("429", str(ai_analysis.MAX_RETRY_WAIT_SECONDS + 1)))
+        result = self.analyze(make_finding("VG-001"), make_finding("VG-002", line=3))
+        self.assertEqual((self.sleeps, len(self.opener.calls)), ([], 1))
+        self.assertEqual(self.statuses(result), ["failed", "skipped"])
+        self.assertEqual(result["analyses"][0]["error"], "AI provider returned HTTP 429 (rate limited; gave up after 0 retries)")
+
+    def test_rate_limit_waits_respect_the_180_second_budget(self):
+        start = self.clock[0]
+        ends = []
+
+        def slow_then_limited(request, timeout):
+            self.clock[0] += timeout  # worst case: every request uses its whole timeout
+            ends.append(self.clock[0] - start)
+            if request_payload(request)["finding_id"] == "VG-001":
+                return answer(request)
+            raise http_429(request, "25")
+        self.opener.handler = slow_then_limited
+        with mock.patch.dict(os.environ, {"AI_TIMEOUT_SECONDS": "60"}):
+            result = self.analyze(*(make_finding(f"VG-00{n}", line=n) for n in range(1, 5)))
+        # t=60 VG-001 done; t=120 429 → wait 25 → t=145; retry gets the remaining 35 s → 429 at t=180;
+        # another wait would pass the budget, so it gives up after 1 retry (before MAX_RATE_LIMIT_RETRIES).
+        self.assertEqual(ends, [60, 120, 180])
+        self.assertEqual(self.sleeps, [25.0])
+        self.assertLessEqual(self.clock[0] - start, ai_analysis.AI_BUDGET_SECONDS)
+        self.assertEqual(self.statuses(result), ["completed", "failed", "skipped", "skipped"])
+        self.assertEqual(result["analyses"][1]["error"], "AI provider returned HTTP 429 (rate limited; gave up after 1 retry)")
+
+    def test_other_failures_are_unchanged_and_not_retried(self):
+        cases = {
+            "timeout": (TimeoutError("timed out"), "timeout", "AI request timed out"),
+            "network": (urllib.error.URLError("refused"), "failed", "AI provider request failed"),
+            "http 500": (None, "failed", "AI provider returned HTTP 500"),
+            "unexpected": (ValueError("boom"), "failed", "AI analysis failed unexpectedly"),
+        }
+        for name, (error, status, message) in cases.items():
+            with self.subTest(name):
+                self.opener.calls.clear()
+
+                def fail(request, timeout, error=error):
+                    if error is None:
+                        raise urllib.error.HTTPError(request.full_url, 500, "Server Error", {}, io.BytesIO(b"x"))
+                    raise error
+                self.opener.handler = fail
+                result = self.analyze(make_finding("VG-001"), make_finding("VG-002", line=3))
+                self.assertEqual([(a["status"], a["error"]) for a in result["analyses"]], [(status, message)] * 2)
+                self.assertEqual(len(self.opener.calls), 2)  # every finding still attempted once, no retries
+        self.opener.handler = lambda r, t: groq_body("not json")
+        result = self.analyze(make_finding())
+        self.assertEqual(result["analyses"][0]["status"], "invalid_output")
+        self.assertEqual(self.sleeps, [])
+
+
 class AdvisoryTests(AIAnalysisTestBase):
     def test_input_findings_unchanged_and_score_unaffected(self):
         self.opener.handler = lambda r, t: groq_body(json.dumps(valid_output(
@@ -451,6 +619,17 @@ class AdvisoryTests(AIAnalysisTestBase):
         score_before = calculate_security_score(normalized)
         result = analyze_findings(normalized, self.source)
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(normalized, before)
+        self.assertEqual(calculate_security_score(normalized), score_before)
+
+    def test_rate_limited_ai_cannot_change_findings_or_score(self):
+        self.opener.handler = lambda request, t: (_ for _ in ()).throw(http_429(request, "1"))
+        normalized = {"findings": [make_finding("VG-001", severity="HIGH"),
+                                   make_finding("VG-002", severity="MEDIUM", line=3)], "summary": {}}
+        before = copy.deepcopy(normalized)
+        score_before = calculate_security_score(normalized)
+        result = analyze_findings(normalized, self.source)
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(normalized, before)
         self.assertEqual(calculate_security_score(normalized), score_before)
 
