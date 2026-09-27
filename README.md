@@ -331,105 +331,214 @@ The existing UI should be preserved while backend functionality is built.
 
 ---
 
-## Backend
+## Backend / Implementation Status
 
-| Phase                                 | Status     |
-| ------------------------------------- | ---------- |
-| Phase 1 — FastAPI Foundation          | ✅ Complete |
-| Phase 2 — React ↔ FastAPI Connection  | ✅ Complete |
-| Phase 3 — Secure Code Upload          | ✅ Complete |
-| Phase 4 — Scan Lifecycle              | 🔴 Current |
-| Phase 5 — Static Analysis             | ⏳ Pending  |
-| Phase 6 — Finding Normalization       | ⏳ Pending  |
-| Phase 7 — Security Score              | ⏳ Pending  |
-| Phase 8 — AI Contextual Analysis      | ⏳ Pending  |
-| Phase 9 — Database                    | ⏳ Pending  |
-| Phase 10 — Report API                 | ⏳ Pending  |
-| Phase 11 — Replace Frontend Mock Data | ⏳ Pending  |
-| Phase 12 — Testing                    | ⏳ Pending  |
-| Phase 13 — Security Hardening         | ⏳ Pending  |
-| Phase 14 — Docker / Deployment        | ⏳ Pending  |
+| Phase | Status |
+| ----- | ------ |
+| Phase 1 — FastAPI Foundation | ✅ Complete |
+| Phase 2 — React ↔ FastAPI Connection | ✅ Complete |
+| Phase 3 — Secure Code Upload | ✅ Complete |
+| Phase 4 — Scan Lifecycle | ✅ Complete |
+| Phase 5 — Static Analysis | ✅ Complete |
+| Phase 6 — Finding Normalization | ✅ Complete |
+| Phase 7 — Security Score | ✅ Complete |
+| Phase 8 — AI Contextual Analysis | ✅ Complete |
+| Phase 9 — Database | ✅ Complete |
+| Phase 10 — Report API | ✅ Complete |
+| Phase 11 — Replace Frontend Mock Data | ✅ Complete |
+| Phase 12 — Testing & Security Hardening | ✅ Complete |
+| Phase 13 — Security Hardening | ✅ Complete |
+| Phase 14a — Demo Deployment Preparation | ✅ Complete — deployed and verified live |
+| Phase 14b — PostgreSQL + Docker Compose | ⏳ Not Started |
 
-For exact verified implementation details, always check:
+For exact verified implementation details, tests, deployment checks, known limitations, and commit references, see:
 
 `Vibe_Guard_Development_Status.md`
 
 ---
 
-# 10. Completed Backend Work
+# 10. Completed Implementation
+
+All phases through **Phase 14a** have been implemented and verified.
 
 ## Phase 1 — FastAPI Foundation
 
 Status: **✅ COMPLETE**
 
-Implemented:
-
-* FastAPI backend
-* Uvicorn setup
-* CORS
-* `/api/health`
-* `/docs`
-* Backend requirements
-* `.env.example`
-* Backend README
-* Basic backend structure
-
-Verified:
-
-* `/api/health` returns HTTP 200
-* `/docs` is accessible
-* Frontend build succeeds
-
----
+Implemented the FastAPI backend foundation, Uvicorn setup, CORS, health endpoint, environment configuration, backend requirements, and basic backend structure.
 
 ## Phase 2 — React ↔ FastAPI Connection
 
 Status: **✅ COMPLETE**
 
-Implemented:
-
-* Frontend API service
-* React → FastAPI health connection
-* CORS communication
-* Backend/frontend connectivity
-
-Verified:
-
-* React successfully communicates with FastAPI
-* `/api/health` returns the expected response
-* CORS works for the local React development server
-* Frontend build succeeds
-
----
+Implemented the frontend API service and verified React-to-FastAPI communication and CORS integration.
 
 ## Phase 3 — Secure Code Upload
 
 Status: **✅ COMPLETE**
 
-Implemented:
+Implemented secure ZIP upload and extraction with:
 
-* `POST /api/scan/upload` (removed in Phase 13; uploads now go only through `POST /api/scans`)
-* Multipart file upload
-* Source/config extension allowlist
-* 5 MB maximum upload size
-* Chunked upload handling
-* Filename sanitization
-* Path traversal protection
-* UUID-based server-side identification
-* Isolated upload storage
-* Runtime upload directory
-* Uploaded code treated as untrusted data
-* Uploaded code is not executed or imported
+- Upload size limits
+- Filename/path validation
+- Path traversal protection
+- ZIP validation
+- File/member and extracted-size limits
+- UUID-based scan directories
+- Source isolation
+- Untrusted-code handling
+- No execution or import of uploaded application code
 
-Verified:
+The legacy upload route was removed in Phase 13; current uploads use `POST /api/scans`.
 
-* Valid source upload succeeds
-* Unsupported file types are rejected
-* Path traversal filenames are handled safely
-* Oversized uploads are rejected
-* Health endpoint continues to work
-* Frontend build succeeds
-* Temporary test uploads are cleaned up
+## Phase 4 — Scan Lifecycle
+
+Status: **✅ COMPLETE**
+
+Implemented real scan lifecycle management:
+
+```text
+uploaded → queued → scanning → analyzing → completed
+                                      ↘ failed
+```
+
+Implemented scan creation, retrieval, listing, status polling, concurrency handling, and terminal-state management.
+
+## Phase 5 — Static Analysis
+
+Status: **✅ COMPLETE**
+
+Implemented Semgrep and Bandit scanning with local Vibe Guard rules, scanner isolation, timeouts, failure handling, and raw scanner output handling.
+
+Current demonstrated language coverage includes:
+
+- Python
+- Java
+- JavaScript
+- JSX
+
+The language set is intentionally extensible and will be expanded in future phases.
+
+## Phase 6 — Finding Normalization
+
+Status: **✅ COMPLETE**
+
+Implemented a common finding schema, severity normalization, category mapping, path confinement, bounded snippets, duplicate merging, deterministic public finding IDs, and malformed-finding handling.
+
+## Phase 7 — Security Score
+
+Status: **✅ COMPLETE**
+
+Implemented deterministic and explainable security scoring based on finding severity and count.
+
+AI output does not control the security score.
+
+## Phase 8 — AI Contextual Analysis
+
+Status: **✅ COMPLETE**
+
+Integrated server-side Groq analysis for contextual vulnerability explanations and remediation guidance.
+
+AI is advisory only:
+
+```text
+Static Finding
+      ↓
+Relevant Source Context
+      ↓
+AI Analysis
+      ↓
+Explanation / Impact / Remediation
+```
+
+AI credentials remain server-side, findings are bounded before analysis, and rate-limit handling is implemented.
+
+## Phase 9 — Database
+
+Status: **✅ COMPLETE**
+
+Implemented SQLAlchemy-based persistence with SQLite and a PostgreSQL-compatible architecture.
+
+Persisted data includes scans, findings, deterministic scores, and AI analysis results.
+
+## Phase 10 — Report API
+
+Status: **✅ COMPLETE**
+
+Implemented read-only report endpoints for completed scans and individual findings. Report data is served from the database rather than raw scanner output.
+
+## Phase 11 — Frontend Integration
+
+Status: **✅ COMPLETE**
+
+Replaced the Review 1 mock-data flow with the real backend while preserving the existing React interface.
+
+The frontend now supports real:
+
+- Scan creation
+- Scan progress polling
+- Reports
+- Findings
+- AI recommendations
+- Scan history
+
+## Phase 12 — Testing & Security Hardening
+
+Status: **✅ COMPLETE**
+
+Completed comprehensive backend regression testing, frontend builds, live HTTP/browser checks, and security-hardening fixes covering upload handling, archive extraction, path validation, oversized requests, environment secrets, and repository hygiene.
+
+## Phase 13 — Security Hardening
+
+Status: **✅ COMPLETE**
+
+Completed deployment-oriented security hardening including:
+
+- Localhost-by-default backend binding
+- Restricted production CORS
+- Host allowlisting
+- Removal of the legacy upload endpoint
+- Uploaded-source cleanup after terminal scans
+- Pinned runtime dependencies
+- Updated deployment/security documentation
+
+## Phase 14a — Demo Deployment Preparation
+
+Status: **✅ COMPLETE — deployed and verified live**
+
+Vibe Guard is publicly deployed as a demo using:
+
+- React/Vite static site
+- Dockerized FastAPI backend
+- Semgrep + Bandit
+- SQLite
+- Groq AI
+- Render
+
+Deployment hardening includes:
+
+- Non-root Docker execution
+- Resource controls
+- One active scan at a time
+- 5 scan submissions per client address per 10 minutes
+- `429` / `503` responses with `Retry-After`
+- Production CORS and Host controls
+- Disabled public API documentation
+- Source cleanup
+- Public-demo warning
+- Server-side AI credentials
+
+The deployment was Docker/Linux validated and then verified live on Render.
+
+## Current Phase
+
+**Phase 14b — PostgreSQL + Docker Compose**
+
+Status: **⏳ NOT STARTED**
+
+Phase 14b is intentionally separate from the completed public demo deployment. It will introduce PostgreSQL and Docker Compose as the next infrastructure milestone.
+
+Do not assume Phase 14b or later phases are implemented until the development-status document records them as verified.
 
 ---
 
@@ -463,96 +572,7 @@ Do not automatically proceed to the next phase.
 
 Do not implement future phases early.
 
-Do not rebuild completed phases unless an actual bug or missing
-requirement is discovered.
-
----
-
-# 12. Current Development Phase
-
-## Phase 4 — Scan Lifecycle
-
-The current authorized backend phase is:
-
-**Scan Lifecycle**
-
-### Required statuses
-
-```text
-uploaded
-queued
-scanning
-analyzing
-completed
-failed
-```
-
-### Required endpoints
-
-```text
-POST /api/scans
-
-GET /api/scans
-
-GET /api/scans/{scan_id}
-
-GET /api/scans/{scan_id}/status
-```
-
-The lifecycle must use real backend state.
-
-Do not use fake delays, timers, or artificial progress merely to make the
-frontend appear to be scanning.
-
-## Phase 4 Scope
-
-Implement only:
-
-* Scan creation
-* Scan identification
-* Scan state management
-* Scan retrieval
-* Scan listing
-* Scan status retrieval
-* Proper handling of nonexistent scan IDs
-* Integration with the existing secure upload functionality where required
-
-The implementation should be structured so later phases can attach:
-
-* Static analysis
-* Finding normalization
-* Security scoring
-* AI analysis
-* Database persistence
-* Report generation
-
-However, those systems are **not part of Phase 4**.
-
----
-
-# 13. Do NOT Implement Future Phases Early
-
-During Phase 4, do **not** implement:
-
-* Semgrep
-* Bandit
-* Static vulnerability analysis
-* Finding normalization
-* Security scoring
-* AI analysis
-* Database persistence unless strictly required for Phase 4
-* Report APIs
-* Docker
-* Authentication
-* Deployment
-* New frontend screens
-* Frontend redesign
-* Fake scanner results
-* Fake vulnerability findings
-
-These belong to later phases.
-
----
+Do not rebuild completed phases unless an actual bug or missing requirement is discovered.
 
 # 14. Security Principles
 
@@ -750,20 +770,20 @@ Only after explicit approval should the master blueprint be modified.
 
 ## Database
 
-* SQLite for initial development
-* PostgreSQL-compatible architecture for later deployment
+* SQLite for the current public demo
+* PostgreSQL-compatible architecture
+* PostgreSQL planned for Phase 14b
 
 ## AI
 
-* AI provider accessed through the backend
+* Groq accessed through the backend
 * API keys stored only server-side
 
 ## Deployment
 
 * Docker
-* AWS or another suitable deployment platform
-
-Deployment will only be addressed after the core system is stable.
+* Render for the current public demo
+* Docker Compose + PostgreSQL planned for Phase 14b
 
 ---
 
@@ -890,7 +910,7 @@ Backend Docker details (local build, resource test, settings): `backend/README.m
 
 ---
 
-# 20. Expected Final Pipeline
+# 20. Verified / Expected Pipeline
 
 The completed Vibe Guard system should provide a real security-analysis
 pipeline:
@@ -1085,6 +1105,7 @@ The system must:
 * Never execute submitted application code
 * Pass relevant security and integration tests
 * Be reproducibly deployable after the core system is stable
+* Maintain the verified public demo deployment where applicable
 
 ---
 
