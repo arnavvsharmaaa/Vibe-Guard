@@ -1207,3 +1207,13 @@ Before making any change, remember:
 **Inspect → Follow the hierarchy → Implement only the current phase → Test → Document → Stop.**
 
 
+
+---
+
+## License
+
+Copyright (c) 2026 Arnav Sharma. All rights reserved.
+
+Vibe Guard is proprietary software. The source code is publicly available for viewing and educational evaluation, but copying, modification, redistribution, commercial use, or creation of derivative works requires prior written permission from the copyright holder. See [`LICENSE`](LICENSE).
+
+Third-party dependencies remain subject to their respective licenses.
