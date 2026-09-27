@@ -41,7 +41,7 @@ Do not redesign or rebuild the frontend unless explicitly instructed.
 | Phase 11 — Replace Frontend Mock Data | ✅ COMPLETE | Yes |
 | Phase 12 — Testing (final testing & hardening validation) | ✅ COMPLETE | Yes |
 | Phase 13 — Security Hardening | ✅ COMPLETE | Yes |
-| Phase 14a — Demo deployment preparation (Docker, Render free tier, SQLite) | 🟡 IMPLEMENTED + DOCKER-VALIDATED — awaiting owner approval to commit | Yes (Docker/WSL2, 2026-09-27) |
+| Phase 14a — Demo deployment preparation (Docker, Render free tier, SQLite) | ✅ COMPLETE — deployed and verified live on Render (`c98756e`) | Yes (Docker/Linux 261/261; live Render tests 2026-09-27) |
 | Phase 14b — PostgreSQL + Docker Compose + production infrastructure | ⏳ NOT STARTED | No |
 
 ---
@@ -166,7 +166,7 @@ Known remaining issues:
 
 ## Phase 14a — Demo Deployment Preparation
 
-Status: 🟡 IMPLEMENTED AND DOCKER-VALIDATED (2026-09-27), awaiting owner approval. Not committed, not deployed.
+Status: ✅ COMPLETE (2026-09-27). Deployed from `c98756e` and verified live on Render. No further phase is authorized.
 Phase 14b (PostgreSQL, Docker Compose) is not authorized.
 
 ---
@@ -175,9 +175,9 @@ Phase 14b (PostgreSQL, Docker Compose) is not authorized.
 
 ## Phase 14a
 
-Status: 🟡 IMPLEMENTED + DOCKER-VALIDATED — awaiting owner approval to commit
+Status: ✅ COMPLETE — deployed and verified live
 
-Date: `2026-09-26` (base commit `2eb39fb`, uncommitted)
+Date: `2026-09-26` – `2026-09-27` (commits `cea884d` Phase 14a, `c98756e` Render client-IP rate limiting)
 
 Scope (owner decision): Blueprint Phase 14 is split. 14a = free public demo on Render (static site + Dockerized FastAPI, SQLite on the container's ephemeral disk, Groq server-side only). 14b = PostgreSQL + Docker Compose + more production-oriented infrastructure (not started). Blueprint Phase 14 names React + FastAPI + PostgreSQL with Docker Compose "eventually"; 14a uses SQLite and a single Dockerfile by owner decision. `Blueprint.md` unchanged.
 
@@ -227,12 +227,27 @@ Docker validation (2026-09-27, Docker Desktop 29.8.0, WSL2 kernel 6.18, cgroup v
 - Canary files (Python module, `conftest.py`, `setup.py`, Node script) that write marker files when run or imported: no marker after the scan
 - Functional checks in the container (46/46): health 200; `/docs`, `/redoc`, `/openapi.json` 404; bad `Host` 400 (before the upload is read); no `server` header; CORS (production origin allowed without credentials, localhost preflight 400, other origins no header, CORS header present on 429/503); concurrent submit 503 + `Retry-After: 30`; 5 submissions then 429 + `Retry-After` with spoofed left `X-Forwarded-For` entries ignored, another client accepted; only `results/` left after a scan; all report endpoints; SQLite on a named volume at `/app/data` survives restart and container re-creation; `docker kill -s KILL` during `scanning` → after restart the scan is `failed` ("Scan interrupted by a server restart"), `source/` removed, report 409, slot free; Docker `HEALTHCHECK` healthy
 - `npm run build` passes; with `VITE_API_URL`/`VITE_PUBLIC_DEMO=true` the bundle has the configured URL, no `localhost:8000`, and the notice
+
+Render deployment (2026-09-27, Render Free; Blueprint from the public repository, auto-deploy off):
+- Frontend (static site): https://vibe-guard-7c4d.onrender.com — backend (Docker web service, one worker): https://vibe-guard-api.onrender.com. Running commit `c98756e`
+- Dashboard configuration: `ALLOWED_ORIGINS` = the frontend URL, `ALLOWED_HOSTS` = the backend host name, `GROQ_API_KEY` entered by the owner (never read or displayed), `CLIENT_IP_HEADER=CF-Connecting-IP`, `TRUSTED_PROXY_HOPS=1` (fallback), `AI_MAX_FINDINGS=10`; frontend `VITE_API_URL` = the backend URL, `VITE_PUBLIC_DEMO=true`. `ENABLE_DOCS` unset
+- Health: `/api/health` 200; Render's health checks pass with `ALLOWED_HOSTS` set (they send the service host name). `/docs`, `/redoc`, `/openapi.json` 404
+- Host: Render's edge routes by `Host`; unknown hosts get Cloudflare `403` before the app, so the app's allowlist is a second layer
+- CORS: only the frontend origin, no credentials; localhost preflight 400; other origins get no allow-origin; the header is present on `429`/`503`
+- Client-IP rate limiting (root cause and fix): Render's proxies (Cloudflare → load balancer → local proxy) append rotating internal addresses to `X-Forwarded-For`, so no fixed `TRUSTED_PROXY_HOPS` entry is the client (live: `1` accepted 9 of 12 submissions from one client, `2` accepted 11 of 11). `c98756e` adds `CLIENT_IP_HEADER`; Render uses `CF-Connecting-IP`, which Cloudflare writes and which reaches the app
+- Rate limiting verified live (no-scan probes; `400` = counted by the limiter, then rejected by name validation): one client's submissions 1–5 accepted, the 6th and every later one `429` with `Retry-After` (565 s) and the production CORS header — 5 submissions / 10 minutes / client IP. 16 requests with fresh forged `X-Forwarded-For` values (1–3 entries) all `429`: forged headers do not change the identity. A client-supplied `CF-Connecting-IP`/`True-Client-IP` (any case) gets Cloudflare `403`. A second public IPv4 address (IPv6/NAT64 path, same ISP and machine) got its own bucket (5 accepted, then `429`) while the first stayed limited; isolation across unrelated networks was not separately tested
+- One active scan: a concurrent submission gets `503` + `Retry-After: 30`
+- Scans: mixed Python/Java/JavaScript ZIP (9 files, fake secrets only) through the API and through the public frontend: completed in 84–103 s (Semgrep ~25 s, Bandit ~5 s, rest Groq), 26 findings (15 HIGH, 9 MEDIUM, 2 LOW) in `.py`/`.java`/`.js`/`.jsx`, score 28, AI `partial` (10 analyzed, 0 failed, 16 skipped by `AI_MAX_FINDINGS=10`), findings and score independent of AI. Snippets present; finding details show the advisory AI explanation, impact, recommendation and fix. After `c98756e`: a normal scan completed and its report endpoints returned 200
+- Frontend: demo notice visible; dashboard, New Scan, upload, progress, report, finding detail, history and settings work; direct loads/refreshes of all routes 200; every API call goes to the backend (none to localhost; no `localhost:8000` in the bundle); no browser console errors
+- Secrets: no Groq key or `gsk_`-shaped string in the bundle, API responses, Render logs or repository; no tracebacks or errors in the logs
+- Resources: no crash or restart events on the free instance across the test scans (Render Free shows no memory/CPU metrics); no spin-down observed within 17 idle minutes
+
 Known limitations:
 - The in-memory limiter and slot are valid only with one worker process and reset on restart. A client that controls many addresses can exceed the per-address limit; the single scan slot bounds throughput
 - The slot is released by the background task. Starlette skips background tasks if sending the response raises; uvicorn ignores sends after a client disconnect, so this does not happen with the configured server, but another ASGI server could leak the slot until restart
 - The frontend shows `503` (busy) with its generic "The Vibe Guard API returned an error. Try again." message (`describeError` hides 5xx details); `429` shows its detail text. Left unchanged (the notice is the only approved UI change)
-- Render rate-limit keying (verified live 2026-09-27; fix implemented, NOT yet committed or deployed): Render's proxies append rotating internal addresses to `X-Forwarded-For`. `TRUSTED_PROXY_HOPS=1` accepted 9 of 12 submissions from one client, `2` accepted 11 of 11; both keys are Render-appended (forged left entries never created fresh quota), so the failure over-limits across clients rather than allowing a bypass. Render's health checks send the service host name (they pass with `ALLOWED_HOSTS` set). Deployed configuration stays `TRUSTED_PROXY_HOPS=1`. Fix: `CLIENT_IP_HEADER` (Render: `CF-Connecting-IP`, written by Cloudflare, which answers `403` to requests that supply `CF-Connecting-IP`/`True-Client-IP`); a value that is missing or not an IP address falls back to `TRUSTED_PROXY_HOPS`. Tests: 261 on Linux, all passed. Live verification pending
-- The `Host` header of Render's own health check is unknown; if `ALLOWED_HOSTS` rejects it, clear `ALLOWED_HOSTS`
+- Public demo: the rate limiter and scan slot are in memory and reset on every restart, deploy or free-tier spin-down; SQLite and scan files are on the free instance's ephemeral disk and are lost at the same times; there is no authentication, so every visitor can see every scan; visitors behind one shared public IP (office, carrier-grade NAT) share one rate-limit bucket
+- `CLIENT_IP_HEADER=CF-Connecting-IP` relies on every request reaching Render through Cloudflare (true for `*.onrender.com`); a missing or non-IP value falls back to `TRUSTED_PROXY_HOPS`
 - At 0.1 CPU a 9-file scan takes ~47 s (Semgrep ~32–46 s of `SEMGREP_TIMEOUT=180`); much larger uploads may reach the Semgrep timeout on the free instance (the scan then fails cleanly)
 - Transitive Python dependencies are not pinned; the Linux image may resolve newer versions than the audited Windows venv (a constraints file is a 14b item)
 - The Debian base keeps its default setuid binaries (`su`, `passwd`, `mount`, ...); unused by the app, no root password
@@ -251,6 +266,7 @@ Files changed:
 - `backend/tests/test_reports.py`
 - `Vibe_Guard_Development_Status.md`
 - New: `backend/Dockerfile`, `backend/.dockerignore`, `render.yaml`, `backend/tests/test_phase14_deployment.py`
+- `c98756e` (Render client-IP rate limiting): `backend/main.py` (`CLIENT_IP_HEADER`), `backend/tests/test_phase14_deployment.py` (2 regression tests; 261 tests on Linux, all passed), `render.yaml`, `backend/.env.example`, `README.md`, `backend/README.md`, `Vibe_Guard_Development_Status.md`
 
 ---
 
