@@ -23,6 +23,13 @@ Vibe Guard is currently deployed as a public demonstration on Render.
 [Backend documentation](backend/README.md) ·
 [Render deployment](#demo-deployment-render--phase-14a)
 
+##📸 PRODUCT PREVIEW
+
+<img width="1919" height="1079" alt="Screenshot 2026-09-27 221935" src="https://github.com/user-attachments/assets/4b4065dd-6f58-46c1-b681-691abedd4ee4" />
+
+
+
+
 ### Project Status
 
 **Phase 14a — COMPLETE**
