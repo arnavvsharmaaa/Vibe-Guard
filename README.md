@@ -877,9 +877,10 @@ Demo behaviour and limits:
 
 After deploying, check: `/api/health` → 200; `/docs` → 404; a direct link to `/reports/<id>` loads; a scan
 completes; a request from another origin gets no `Access-Control-Allow-Origin`; and that 6 quick submissions from one
-browser get `429` even with a made-up `X-Forwarded-For` header (confirms `TRUSTED_PROXY_HOPS=1` matches Render's
-proxy). If the Render health check fails with `400`, Render is probing with a different `Host`: clear
-`ALLOWED_HOSTS`, redeploy, and report it.
+browser get `429` even with a made-up `X-Forwarded-For` header (confirms the client address comes from
+`CLIENT_IP_HEADER=CF-Connecting-IP`; Render's proxies append rotating internal addresses to `X-Forwarded-For`, so no
+fixed `TRUSTED_PROXY_HOPS` value identifies the client there). Render's health checks send the service host name,
+so `ALLOWED_HOSTS` does not affect them.
 
 Rollback: Render keeps previous deploys (**Rollback** on the service's Events page); a bad backend deploy that fails
 `/api/health` never receives traffic. To take the demo offline, suspend the services. To revoke AI access, delete or

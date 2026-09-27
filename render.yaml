@@ -21,7 +21,12 @@ services:
         sync: false
       - key: AI_MAX_FINDINGS
         value: "10"
-      - key: TRUSTED_PROXY_HOPS # client address = last X-Forwarded-For entry (added by Render's proxy)
+      # Rate-limit client address. Render's proxies append rotating internal addresses to X-Forwarded-For, so no
+      # fixed entry is the client; Cloudflare (in front of *.onrender.com) writes CF-Connecting-IP and rejects
+      # requests that supply it. TRUSTED_PROXY_HOPS=1 is the fallback (an address Render appended; never client-set).
+      - key: CLIENT_IP_HEADER
+        value: CF-Connecting-IP
+      - key: TRUSTED_PROXY_HOPS
         value: "1"
 
   # React/Vite frontend. VITE_* values are baked into the bundle at build time.

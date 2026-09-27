@@ -107,7 +107,8 @@ Deployment settings (all optional locally):
 | `UPLOAD_DIR` | `backend/uploads` | Scan directory root |
 | `MAX_ACTIVE_SCANS` | `1` | Scans running at once; further submissions get `503` with `Retry-After` and are not stored |
 | `SCAN_RATE_LIMIT` / `SCAN_RATE_WINDOW_SECONDS` | `5` / `600` | Scan submissions per client address in a sliding window; more get `429` with `Retry-After`. Every submission that reaches the endpoint counts, including rejected uploads; `503` (busy), `413` (too large) and `422` (malformed form) responses do not |
-| `TRUSTED_PROXY_HOPS` | `0` | `0`: the client address is the socket peer. `N`: the Nth `X-Forwarded-For` entry from the right (Render: `1`). Entries a client adds on the left are ignored |
+| `TRUSTED_PROXY_HOPS` | `0` | `0`: the client address is the socket peer. `N`: the Nth `X-Forwarded-For` entry from the right. Entries a client adds on the left are ignored |
+| `CLIENT_IP_HEADER` | empty | Header written by a trusted edge proxy with the client address; takes precedence over `TRUSTED_PROXY_HOPS`, and a missing or non-IP value falls back to it. Render: `CF-Connecting-IP` (its proxies append rotating internal addresses to `X-Forwarded-For`). Only for deployments where every request passes that proxy |
 
 The limiter and the scan slot are in memory, which is why the API must run as a single worker process.
 

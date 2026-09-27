@@ -30,7 +30,7 @@ PROD_ORIGIN = "https://vibe-guard.example"
 DEV_ORIGIN = "http://localhost:5173"
 CODE = VULNERABLE_PY.encode()
 DEPLOY_ENV_KEYS = ("ENABLE_DOCS", "ALLOWED_ORIGINS", "ALLOWED_HOSTS", "UPLOAD_DIR", "MAX_ACTIVE_SCANS",
-                   "SCAN_RATE_LIMIT", "SCAN_RATE_WINDOW_SECONDS", "TRUSTED_PROXY_HOPS")
+                   "SCAN_RATE_LIMIT", "SCAN_RATE_WINDOW_SECONDS", "TRUSTED_PROXY_HOPS", "CLIENT_IP_HEADER")
 
 
 def load_main(env: dict) -> dict:
@@ -128,6 +128,7 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(module["MAX_ACTIVE_SCANS"], 1)
         self.assertEqual((module["SCAN_RATE_LIMIT"], module["SCAN_RATE_WINDOW_SECONDS"]), (5, 600))
         self.assertEqual(module["TRUSTED_PROXY_HOPS"], 0)
+        self.assertEqual(module["CLIENT_IP_HEADER"], "")  # off unless the deployment has a trusted edge proxy
         self.assertFalse(module["ENABLE_DOCS"])
 
     def test_upload_dir_from_environment(self):
@@ -202,6 +203,38 @@ class SubmissionLimitTests(AppTestCase):
                 self.assertEqual(self.post_from(f"10.0.0.{n}, 203.0.113.7").status_code, 201)
             self.assertEqual(self.post_from("10.9.9.9, 203.0.113.7").status_code, 429)
             self.assertEqual(self.post_from("203.0.113.8").status_code, 201)
+
+    def test_client_ip_header_keys_the_limit(self):
+        # Render: the proxies append rotating internal addresses to X-Forwarded-For, so its rightmost entry changes
+        # per request; the edge-written CF-Connecting-IP header stays the client's address.
+        def post(client_ip, rotating_hop):
+            return self.client.post("/api/scans", data={"project_name": "demo"}, files={"file": ("a.py", CODE)},
+                                    headers={"CF-Connecting-IP": client_ip,
+                                             "X-Forwarded-For": f"10.9.9.9, {client_ip}, 10.213.0.{rotating_hop}"})
+
+        with mock.patch.object(main, "CLIENT_IP_HEADER", "CF-Connecting-IP"), \
+                mock.patch.object(main, "TRUSTED_PROXY_HOPS", 1):
+            for n in range(5):
+                self.assertEqual(post("203.0.113.7", n).status_code, 201)
+            response = post("203.0.113.7", 99)
+            self.assertEqual(response.status_code, 429)
+            self.assertTrue(1 <= int(response.headers["retry-after"]) <= 600)
+            self.assertEqual(post("2001:db8::7", 100).status_code, 201)  # another client: its own window
+
+    def test_client_ip_header_fallback(self):
+        def request(headers):
+            return mock.Mock(client=mock.Mock(host="198.51.100.1"),
+                             headers={"x-forwarded-for": "1.1.1.1, 2.2.2.2", **headers})
+
+        with mock.patch.object(main, "CLIENT_IP_HEADER", "cf-connecting-ip"):
+            self.assertEqual(main._client_ip(request({"cf-connecting-ip": " 203.0.113.7 "})), "203.0.113.7")
+            self.assertEqual(main._client_ip(request({"cf-connecting-ip": "2001:DB8::7"})), "2001:db8::7")
+            # missing or not an IP address: the X-Forwarded-For/socket logic decides, never the raw header value
+            for headers in ({}, {"cf-connecting-ip": ""}, {"cf-connecting-ip": "evil"},
+                            {"cf-connecting-ip": "1.1.1.1, 2.2.2.2"}):
+                self.assertEqual(main._client_ip(request(headers)), "198.51.100.1")
+                with mock.patch.object(main, "TRUSTED_PROXY_HOPS", 1):
+                    self.assertEqual(main._client_ip(request(headers)), "2.2.2.2")
 
     def test_client_ip(self):
         request = mock.Mock(client=mock.Mock(host="198.51.100.1"), headers={"x-forwarded-for": "1.1.1.1, 2.2.2.2"})
@@ -380,6 +413,7 @@ class DeploymentFileTests(unittest.TestCase):
         self.assertNotRegex(render, r"https?://[a-z0-9-]+\.onrender\.com")  # URLs are entered in the dashboard
         for key in ("ALLOWED_ORIGINS", "ALLOWED_HOSTS", "GROQ_API_KEY", "VITE_API_URL"):
             self.assertRegex(render, rf"- key: {key}\b[^\n]*\n\s+sync: false")
+        self.assertRegex(render, r"- key: CLIENT_IP_HEADER\b[^\n]*\n\s+value: CF-Connecting-IP\n")
         self.assertIn("source: /*", render)
         self.assertIn("destination: /index.html", render)
         self.assertNotRegex(render, r"gsk_[A-Za-z0-9]")
@@ -388,8 +422,9 @@ class DeploymentFileTests(unittest.TestCase):
         lines = dict(line.split("=", 1) for line in self.read(BACKEND / ".env.example").splitlines()
                      if line and not line.startswith("#"))
         for key in ("ALLOWED_HOSTS", "UPLOAD_DIR", "ENABLE_DOCS", "MAX_ACTIVE_SCANS", "SCAN_RATE_LIMIT",
-                    "SCAN_RATE_WINDOW_SECONDS", "TRUSTED_PROXY_HOPS"):
+                    "SCAN_RATE_WINDOW_SECONDS", "TRUSTED_PROXY_HOPS", "CLIENT_IP_HEADER"):
             self.assertIn(key, lines)
+        self.assertEqual(lines["CLIENT_IP_HEADER"], "")
         self.assertEqual(lines["GROQ_API_KEY"], "")
         self.assertEqual(lines["ENABLE_DOCS"], "")
 

@@ -1,4 +1,5 @@
 import builtins
+import ipaddress
 import json
 import math
 import os
@@ -113,6 +114,10 @@ BUSY_RETRY_AFTER_SECONDS = 30
 # Number of reverse proxies in front of the app that append to X-Forwarded-For. 0 (default) uses the socket peer.
 # The client address is taken that many entries from the right, so a client-supplied X-Forwarded-For is ignored.
 TRUSTED_PROXY_HOPS = max(0, int(os.getenv("TRUSTED_PROXY_HOPS", "0")))
+# Request header that carries the client address, written by the edge proxy (Render: CF-Connecting-IP, set by
+# Cloudflare, which rejects requests that already carry it). Only for deployments where every request passes that
+# proxy. Takes precedence over TRUSTED_PROXY_HOPS; a missing or non-IP value falls back to it.
+CLIENT_IP_HEADER = os.getenv("CLIENT_IP_HEADER", "").strip()
 
 # CORS: ALLOWED_ORIGINS (comma-separated) replaces the local development origins when it is set.
 DEV_ORIGINS = [
@@ -643,6 +648,11 @@ scan_slots = threading.BoundedSemaphore(MAX_ACTIVE_SCANS)
 
 
 def _client_ip(request: Request) -> str:
+    if CLIENT_IP_HEADER:
+        try:
+            return str(ipaddress.ip_address(request.headers.get(CLIENT_IP_HEADER, "").strip()))
+        except ValueError:
+            pass
     if TRUSTED_PROXY_HOPS:
         forwarded = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
         if len(forwarded) >= TRUSTED_PROXY_HOPS:
