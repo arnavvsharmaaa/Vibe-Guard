@@ -22,6 +22,10 @@ RULES_PATH = Path(__file__).resolve().parent / "semgrep_rules" / "vibe_guard.yml
 SEMGREP_TIMEOUT = 180  # seconds, whole run
 SEMGREP_RULE_TIMEOUT = 30  # seconds, per rule and file
 SEMGREP_MAX_TARGET_BYTES = 1_000_000
+# Conservative for a small container (512 MB): one worker instead of one per detected CPU (inside a container that
+# can be the host's CPU count), and a memory cap per rule and file (MiB), as Semgrep's --max-memory defines it.
+SEMGREP_JOBS = 1
+SEMGREP_MAX_MEMORY_MB = 300
 BANDIT_TIMEOUT = 120  # seconds, all batches together
 BANDIT_BATCH_SIZE = 200  # keeps Windows command lines under their length limit
 
@@ -135,6 +139,8 @@ def _semgrep(source_dir: Path, results_dir: Path) -> dict:
         "--project-root", ".",  # forces a non-VCS project, so git is never consulted
         "--max-target-bytes", str(SEMGREP_MAX_TARGET_BYTES),
         "--timeout", str(SEMGREP_RULE_TIMEOUT),
+        "--jobs", str(SEMGREP_JOBS),
+        "--max-memory", str(SEMGREP_MAX_MEMORY_MB),
         "--quiet",
         "--", ".",
     ]

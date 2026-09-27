@@ -40,9 +40,13 @@ class ReportTestCase(DatabaseTestCase):
         super().setUp()
         self.registry_patch = mock.patch.object(main, "scan_registry", self.registry)
         self.registry_patch.start()
+        # Not about the Phase 14 submission limit (test_phase14_deployment covers it)
+        self.limiter_patch = mock.patch.object(main, "scan_rate_limiter", main.ScanRateLimiter(10**6, 600))
+        self.limiter_patch.start()
         self.client = TestClient(main.app)
 
     def tearDown(self):
+        self.limiter_patch.stop()
         self.registry_patch.stop()
         super().tearDown()
 

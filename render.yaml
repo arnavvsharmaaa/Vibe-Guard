@@ -1,0 +1,53 @@
+# Render Blueprint for the Vibe Guard public demo (Phase 14a): free tier only, no persistent disk, no database service.
+# Service URLs are only known once the services exist, so every URL (and the Groq key) is entered in the Render
+# dashboard (sync: false) instead of being written here. See README.md "Demo deployment (Render)".
+services:
+  # FastAPI + Semgrep + Bandit, built from backend/Dockerfile. SQLite and scan files live on the container's
+  # ephemeral disk: they are lost on every deploy, restart and free-tier spin-down.
+  - type: web
+    name: vibe-guard-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: ALLOWED_ORIGINS # https://<static site>.onrender.com
+        sync: false
+      - key: ALLOWED_HOSTS # <api service>.onrender.com
+        sync: false
+      - key: GROQ_API_KEY # optional; AI analysis is disabled without it
+        sync: false
+      - key: AI_MAX_FINDINGS
+        value: "10"
+      - key: TRUSTED_PROXY_HOPS # client address = last X-Forwarded-For entry (added by Render's proxy)
+        value: "1"
+
+  # React/Vite frontend. VITE_* values are baked into the bundle at build time.
+  - type: web
+    name: vibe-guard
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeploy: false
+    envVars:
+      - key: VITE_API_URL # https://<api service>.onrender.com
+        sync: false
+      - key: VITE_PUBLIC_DEMO
+        value: "true"
+    routes:
+      # BrowserRouter: deep links such as /reports/<id> are served by index.html
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer

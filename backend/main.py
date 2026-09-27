@@ -1,17 +1,22 @@
 import builtins
 import json
+import math
 import os
 import re
 import shutil
 import stat
+import threading
+import time
 import uuid
 import zipfile
 import zlib
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
@@ -26,19 +31,26 @@ from scanners import SUCCESS_STATUSES, load_raw_results, run_static_analysis
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scan_registry.init()
+    _recover_interrupted_scans()
     yield
 
+
+# /docs, /redoc and /openapi.json are only served when ENABLE_DOCS=1 (local development).
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "").strip() == "1"
 
 app = FastAPI(
     title="Vibe Guard API",
     description="Backend API for Vibe Guard - AI-Powered Secure Code Auditor",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 
-# Upload directory configuration
+# Upload directory configuration (UPLOAD_DIR overrides it, e.g. /app/data/uploads in the container)
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "").strip() or BASE_DIR / "uploads").resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Maximum upload size limit (5 MB)
@@ -80,6 +92,10 @@ SCAN_TRANSITIONS = {
     "failed": set(),
 }
 
+# Statuses of a scan that has not finished; after a server restart no pipeline is driving them any more.
+ACTIVE_STATUSES = ("uploaded", "queued", "scanning", "analyzing")
+INTERRUPTED_ERROR = "Scan interrupted by a server restart"
+
 SCAN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 # Public finding IDs (VG-001) are unique per scan only, so the Report API addresses a finding as "{scan_id}:VG-001".
 FINDING_REF_PATTERN = re.compile(r"([0-9a-f]{32}):(VG-[0-9]{3,})")
@@ -89,17 +105,24 @@ MAX_PROJECT_NAME_LENGTH = 100
 # (e.g. HOST=0.0.0.0 inside a deployment/container boundary).
 DEFAULT_HOST = "127.0.0.1"
 
-# CORS configuration to allow local React development server
-origins = [
+# Public-demo abuse limits: scans running at once, and scan submissions per client in a sliding window.
+MAX_ACTIVE_SCANS = max(1, int(os.getenv("MAX_ACTIVE_SCANS", "1")))
+SCAN_RATE_LIMIT = max(1, int(os.getenv("SCAN_RATE_LIMIT", "5")))
+SCAN_RATE_WINDOW_SECONDS = max(1, int(os.getenv("SCAN_RATE_WINDOW_SECONDS", "600")))
+BUSY_RETRY_AFTER_SECONDS = 30
+# Number of reverse proxies in front of the app that append to X-Forwarded-For. 0 (default) uses the socket peer.
+# The client address is taken that many entries from the right, so a client-supplied X-Forwarded-For is ignored.
+TRUSTED_PROXY_HOPS = max(0, int(os.getenv("TRUSTED_PROXY_HOPS", "0")))
+
+# CORS: ALLOWED_ORIGINS (comma-separated) replaces the local development origins when it is set.
+DEV_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
-
-extra_origins = os.getenv("ALLOWED_ORIGINS")
-if extra_origins:
-    origins.extend([origin.strip() for origin in extra_origins.split(",") if origin.strip()])
+configured_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip() and o.strip() != "*"]
+origins = configured_origins or DEV_ORIGINS
 
 # The frontend sends no cookies or credentials and only uses GET and POST.
 app.add_middleware(
@@ -147,6 +170,11 @@ class UploadSizeLimitMiddleware:
 
 
 app.add_middleware(UploadSizeLimitMiddleware)
+
+# Host allowlist (ALLOWED_HOSTS, comma-separated). Added last, so it runs first and rejects other Host headers with 400.
+allowed_hosts = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
+if allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 
 @app.get("/api/health", tags=["Health"])
@@ -473,6 +501,14 @@ class ScanRegistry:
         with self._sessions.begin() as session:
             return self._record(self._advance(session, scan_id, new_status, **values))
 
+    def fail_interrupted(self, error: str) -> builtins.list[str]:
+        """Mark every scan that was still in progress as failed. Only called at startup, when no scan is running."""
+        with self._sessions.begin() as session:
+            scan_ids = session.scalars(select(Scan.scan_id).where(Scan.status.in_(ACTIVE_STATUSES))).all()
+            for scan_id in scan_ids:
+                self._advance(session, scan_id, "failed", error=error)
+        return builtins.list(scan_ids)
+
     def set_scanners(self, scan_id: str, summary: dict) -> None:
         with self._sessions.begin() as session:
             result = session.execute(update(Scan).where(Scan.scan_id == scan_id).values(scanners=summary))
@@ -565,6 +601,62 @@ def _remove_source(scan_dir: Path) -> None:
     shutil.rmtree(scan_dir / "source", ignore_errors=True)
 
 
+def _recover_interrupted_scans() -> None:
+    """
+    Startup recovery: no scan runs yet, so a scan still in progress was interrupted by a restart and is marked
+    failed, and any uploaded source or archive left on disk is removed. results/ is kept, as after any scan.
+    """
+    scan_registry.fail_interrupted(INTERRUPTED_ERROR)
+    for scan_dir in UPLOAD_DIR.iterdir():
+        if scan_dir.is_dir() and not scan_dir.is_symlink() and SCAN_ID_PATTERN.fullmatch(scan_dir.name):
+            _remove_source(scan_dir)
+            (scan_dir / "upload.zip").unlink(missing_ok=True)
+
+
+class ScanRateLimiter:
+    """In-memory sliding window of scan submissions per client. Valid because the API runs as one worker process."""
+
+    def __init__(self, limit: int, window: float):
+        self.limit = limit
+        self.window = window
+        self._hits: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def hit(self, client: str) -> int | None:
+        """Records a submission and returns None, or returns the seconds to wait when the client is over the limit."""
+        now = time.monotonic()
+        with self._lock:
+            for key in [k for k, hits in self._hits.items() if hits[-1] <= now - self.window]:
+                del self._hits[key]
+            hits = self._hits.setdefault(client, deque())
+            while hits and hits[0] <= now - self.window:
+                hits.popleft()
+            if len(hits) >= self.limit:
+                return max(1, math.ceil(hits[0] + self.window - now))
+            hits.append(now)
+            return None
+
+
+scan_rate_limiter = ScanRateLimiter(SCAN_RATE_LIMIT, SCAN_RATE_WINDOW_SECONDS)
+# One slot per scan that may run at once; a slot is held from upload until the pipeline has finished.
+scan_slots = threading.BoundedSemaphore(MAX_ACTIVE_SCANS)
+
+
+def _client_ip(request: Request) -> str:
+    if TRUSTED_PROXY_HOPS:
+        forwarded = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        if len(forwarded) >= TRUSTED_PROXY_HOPS:
+            return forwarded[-TRUSTED_PROXY_HOPS]
+    return request.client.host if request.client else "unknown"
+
+
+def _run_scan_and_release_slot(scan_id: str) -> None:
+    try:
+        _run_scan_pipeline(scan_id)
+    finally:
+        scan_slots.release()
+
+
 def _validate_project_name(project_name: str) -> str:
     name = project_name.strip()
     if not name:
@@ -589,23 +681,38 @@ def _get_scan_or_404(scan_id: str) -> dict:
 
 
 @app.post("/api/scans", tags=["Scans"], status_code=status.HTTP_201_CREATED)
-async def create_scan(background_tasks: BackgroundTasks, project_name: str = Form(...), file: UploadFile = File(...)):
+async def create_scan(request: Request, background_tasks: BackgroundTasks, project_name: str = Form(...),
+                      file: UploadFile = File(...)):
     """
     Creates a scan from an uploaded source file or ZIP archive and queues static analysis.
     """
-    name = _validate_project_name(project_name)
-    upload = await _store_upload(file)
+    if not scan_slots.acquire(blocking=False):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The scanner is busy with another scan. Try again shortly.",
+                            headers={"Retry-After": str(BUSY_RETRY_AFTER_SECONDS)})
     try:
-        scan_registry.create(upload["scan_id"], name, upload["filename"], upload["file_count"])
-        scan = scan_registry.transition(upload["scan_id"], "queued")
-    except Exception:
+        retry_after = scan_rate_limiter.hit(_client_ip(request))
+        if retry_after is not None:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                                detail="Too many scans submitted. Try again later.",
+                                headers={"Retry-After": str(retry_after)})
+        name = _validate_project_name(project_name)
+        upload = await _store_upload(file)
         try:
-            scan_registry.transition(upload["scan_id"], "failed", error="Scan could not be queued")
+            scan_registry.create(upload["scan_id"], name, upload["filename"], upload["file_count"])
+            scan = scan_registry.transition(upload["scan_id"], "queued")
         except Exception:
-            pass
-        shutil.rmtree(UPLOAD_DIR / upload["scan_id"], ignore_errors=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create scan")
-    background_tasks.add_task(_run_scan_pipeline, scan["scan_id"])
+            try:
+                scan_registry.transition(upload["scan_id"], "failed", error="Scan could not be queued")
+            except Exception:
+                pass
+            shutil.rmtree(UPLOAD_DIR / upload["scan_id"], ignore_errors=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create scan")
+    except BaseException:
+        scan_slots.release()
+        raise
+    # The slot is released when the pipeline has finished.
+    background_tasks.add_task(_run_scan_and_release_slot, scan["scan_id"])
     return {"scan_id": scan["scan_id"], "project_name": scan["project_name"], "status": scan["status"]}
 
 

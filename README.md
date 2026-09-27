@@ -823,7 +823,7 @@ Backend:
 http://localhost:8000
 ```
 
-FastAPI documentation:
+FastAPI documentation (only served when the backend runs with `ENABLE_DOCS=1`):
 
 ```text
 http://localhost:8000/docs
@@ -834,6 +834,58 @@ Health endpoint:
 ```text
 http://localhost:8000/api/health
 ```
+
+---
+
+## Demo deployment (Render) — Phase 14a
+
+A free, public **demo** deployment. It is not production infrastructure (PostgreSQL and Docker Compose are Phase 14b).
+
+```text
+Render Static Site (free)              Render Web Service (free, Docker)
+React/Vite dist/  ── HTTPS ──►  FastAPI (1 worker) + Semgrep + Bandit
+VITE_API_URL set at build time         SQLite + scan files on the container's ephemeral disk
+                                       Groq (optional, server-side key only)
+```
+
+Everything is described in `render.yaml` (a Render Blueprint). Service URLs and the Groq key are **not** in the
+repository; Render asks for them when the Blueprint is created (`sync: false`).
+
+1. Render dashboard → **New → Blueprint** → select this repository. It creates `vibe-guard-api` (Docker, built from
+   `backend/Dockerfile`, health check `/api/health`) and `vibe-guard` (static site: `npm ci && npm run build`,
+   publishes `dist/`, rewrites every path to `/index.html` for client-side routes).
+2. When prompted, enter:
+   - `vibe-guard-api` → `ALLOWED_ORIGINS` = `https://<static site>.onrender.com`,
+     `ALLOWED_HOSTS` = `<api service>.onrender.com`, `GROQ_API_KEY` = a demo key (optional; leave empty to disable AI)
+   - `vibe-guard` → `VITE_API_URL` = `https://<api service>.onrender.com`
+
+   If Render added a suffix to a service name, use the URLs Render shows. `VITE_API_URL` is baked into the bundle, so
+   changing it requires a new static-site deploy.
+3. Deploy both services (auto-deploy is off; deploy from the dashboard).
+
+Demo behaviour and limits:
+- **No persistence guarantee.** The free instance has no persistent disk: the SQLite database, reports and scan files
+  are lost on every deploy, restart and free-tier spin-down (after about 15 minutes without traffic). The first request
+  after a spin-down can take a minute.
+- **Public data.** There is no authentication: every visitor can see every scan and its code snippets. The frontend
+  shows a public-demo notice (`VITE_PUBLIC_DEMO=true`).
+- **Abuse limits.** One scan at a time (`503` + `Retry-After` while busy); 5 scan submissions per client address per
+  10 minutes (`429` + `Retry-After`); the existing 5 MB upload, 1000 file and 50 MB extraction limits;
+  `AI_MAX_FINDINGS=10`. Use a Groq key on an account without billing so abuse cannot create costs.
+- `/docs`, `/redoc` and `/openapi.json` are disabled; CORS allows only the static site; other `Host` headers get `400`.
+- HTTPS is provided by Render for both `*.onrender.com` services.
+
+After deploying, check: `/api/health` → 200; `/docs` → 404; a direct link to `/reports/<id>` loads; a scan
+completes; a request from another origin gets no `Access-Control-Allow-Origin`; and that 6 quick submissions from one
+browser get `429` even with a made-up `X-Forwarded-For` header (confirms `TRUSTED_PROXY_HOPS=1` matches Render's
+proxy). If the Render health check fails with `400`, Render is probing with a different `Host`: clear
+`ALLOWED_HOSTS`, redeploy, and report it.
+
+Rollback: Render keeps previous deploys (**Rollback** on the service's Events page); a bad backend deploy that fails
+`/api/health` never receives traffic. To take the demo offline, suspend the services. To revoke AI access, delete or
+rotate `GROQ_API_KEY`; scans still complete without AI.
+
+Backend Docker details (local build, resource test, settings): `backend/README.md`, section 8.
 
 ---
 

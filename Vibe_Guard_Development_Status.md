@@ -41,7 +41,8 @@ Do not redesign or rebuild the frontend unless explicitly instructed.
 | Phase 11 — Replace Frontend Mock Data | ✅ COMPLETE | Yes |
 | Phase 12 — Testing (final testing & hardening validation) | ✅ COMPLETE | Yes |
 | Phase 13 — Security Hardening | ✅ COMPLETE | Yes |
-| Phase 14 — Docker / Deployment | ⏳ NOT STARTED | No |
+| Phase 14a — Demo deployment preparation (Docker, Render free tier, SQLite) | 🟡 IMPLEMENTED + DOCKER-VALIDATED — awaiting owner approval to commit | Yes (Docker/WSL2, 2026-09-27) |
+| Phase 14b — PostgreSQL + Docker Compose + production infrastructure | ⏳ NOT STARTED | No |
 
 ---
 
@@ -163,14 +164,95 @@ Known remaining issues:
 
 # Current Authorized Phase
 
-## Phase 13 — Security Hardening
+## Phase 14a — Demo Deployment Preparation
 
-Status: ✅ COMPLETE. No further phase is authorized.
-Blueprint Phase 14 (Docker / Deployment) remains NOT STARTED.
+Status: 🟡 IMPLEMENTED AND DOCKER-VALIDATED (2026-09-27), awaiting owner approval. Not committed, not deployed.
+Phase 14b (PostgreSQL, Docker Compose) is not authorized.
 
 ---
 
 # Phase Completion Log
+
+## Phase 14a
+
+Status: 🟡 IMPLEMENTED + DOCKER-VALIDATED — awaiting owner approval to commit
+
+Date: `2026-09-26` (base commit `2eb39fb`, uncommitted)
+
+Scope (owner decision): Blueprint Phase 14 is split. 14a = free public demo on Render (static site + Dockerized FastAPI, SQLite on the container's ephemeral disk, Groq server-side only). 14b = PostgreSQL + Docker Compose + more production-oriented infrastructure (not started). Blueprint Phase 14 names React + FastAPI + PostgreSQL with Docker Compose "eventually"; 14a uses SQLite and a single Dockerfile by owner decision. `Blueprint.md` unchanged.
+
+Changes:
+- D1 — `backend/Dockerfile`: `python:3.14-slim` (Debian, glibc 2.41; Semgrep 1.178.0's Linux wheel is `manylinux_2_34`), pinned `requirements.txt`, only the runtime modules and `semgrep_rules/` copied, non-root `app` user (uid 10001, home directory for `~/.semgrep`), only `/app/data` writable, `DATABASE_URL=sqlite:////app/data/vibe_guard.db`, `UPLOAD_DIR=/app/data/uploads`, `HOST=0.0.0.0`, `uvicorn --port $PORT --workers 1 --no-proxy-headers --no-server-header` (no `--reload`), local `HEALTHCHECK` on `/api/health`
+- D2 — `backend/.dockerignore`: `.env*`, `*.db`, `uploads/`, `venv/`, `tests/`, caches
+- D3 — `render.yaml`: free Docker web service (`healthCheckPath: /api/health`, auto-deploy off, `AI_MAX_FINDINGS=10`, `TRUSTED_PROXY_HOPS=1`) and static site (`npm ci && npm run build`, `dist/`, `/*` → `/index.html` rewrite, `VITE_PUBLIC_DEMO=true`, three security headers). `ALLOWED_ORIGINS`, `ALLOWED_HOSTS`, `GROQ_API_KEY` and `VITE_API_URL` are `sync: false` (entered in the dashboard; no production URL in the repository). No disk, no database service
+- B1 — `UPLOAD_DIR` environment variable (default unchanged: `backend/uploads`)
+- B2 — Startup recovery (`lifespan`): scans in `uploaded`/`queued`/`scanning`/`analyzing` → `failed` with "Scan interrupted by a server restart" (one transaction, through the normal compare-and-set transition); every scan directory's `source/` and `upload.zip` removed; `results/`, completed and failed scans unchanged; only directories named like a scan ID are touched
+- B3 — `MAX_ACTIVE_SCANS` (default 1): a slot is taken before the rate-limit check and held until the pipeline finishes (`_run_scan_and_release_slot`); busy → `503` + `Retry-After: 30`, nothing stored, quota not used. Released on every error path
+- B4 — Per-client limit `SCAN_RATE_LIMIT`/`SCAN_RATE_WINDOW_SECONDS` (default 5 per 600 s; in-memory sliding window; no new dependency) → `429` + `Retry-After` (seconds until the oldest submission expires). Client address: the socket peer by default; with `TRUSTED_PROXY_HOPS=N`, the Nth `X-Forwarded-For` entry from the right (entries a client adds on the left are ignored). uvicorn's own proxy-header handling is off, because with `--forwarded-allow-ips=*` it uses the leftmost, client-controlled entry
+- B5 — Semgrep `--jobs 1` (the default is the detected CPU count: 14 on the dev machine) and `--max-memory 300`
+- B6 — `/docs`, `/redoc`, `/openapi.json` only with `ENABLE_DOCS=1`
+- B7 — CORS: `ALLOWED_ORIGINS`, when set, replaces the localhost defaults (it was appended to them); `*` entries are ignored. Credentials off and GET/POST only (unchanged)
+- B8 — `ALLOWED_HOSTS` → Starlette `TrustedHostMiddleware` (outermost; `400 Invalid host header`). Not added when unset
+- F1 — `src/components/Layout.jsx`: public-demo notice (existing `.notice` style), shown only when built with `VITE_PUBLIC_DEMO=true`. The only UI change
+- Docs: `README.md` (Render demo deployment, limits, post-deploy checks, rollback; `/docs` needs `ENABLE_DOCS=1`); `backend/README.md` (section 8 Docker/deployment; stray PowerShell text at the end removed; corrupted code fences and endpoint formatting repaired); `backend/.env.example` (new variables; no secret values)
+
+Unchanged: API routes and response shapes (only new `429`/`503` responses on `POST /api/scans`), upload/extraction limits and checks, source cleanup after each scan, vulnerability categories, normalization, scoring, the AI advisory model, the database schema, `requirements.txt` (no new dependency), `src/services/api.js`.
+
+Tests:
+- New `backend/tests/test_phase14_deployment.py` (29 tests): docs off by default and on only with `ENABLE_DOCS=1`; production CORS (production origin allowed, localhost and other origins refused, `*` ignored, dev defaults without `ALLOWED_ORIGINS`); Host allowlist (allowed hosts 200, others 400 including before an upload is read, no check when unset); config defaults and `UPLOAD_DIR`; sliding-window limiter (expiry, per client, stale-key pruning); 6th submission → 429 with `Retry-After` and nothing stored; rejected uploads count; spoofed `X-Forwarded-For` ignored by default; with one trusted hop the rightmost entry is used; busy → 503 without storing or using quota; slot held during the pipeline and released after success, pipeline crash, rejected upload, invalid name and 429; startup recovery of every active status, `failed` untouched, results kept, non-scan directories and completed scans untouched; Semgrep argv has `--jobs 1` and `--max-memory` before `--`; Dockerfile (base image, non-root after every `RUN`, explicit `COPY` list, one worker, `$PORT`, no `--reload`/`forwarded-allow-ips`/key); `.dockerignore`; `render.yaml` (health check, free plan, no disk, no hardcoded URL, secrets and URLs `sync: false`, SPA rewrite); `.env.example`; no production URL in `api.js`
+- Existing tests adapted: the four fixtures that submit many scans (`AppTestCase`, `PipelineRegressionTests`, `PipelinePersistenceTests`, `ReportTestCase`) use an unlimited limiter so they keep testing what they tested before; `test_health_and_docs` expects `/docs` → 404 by default
+
+Results:
+- Backend: 259 run, all passed, 1 skipped (the existing Windows symlink test)
+- `npm run build` → passed. Demo build (`VITE_PUBLIC_DEMO=true`, `VITE_API_URL=https://api.demo-check.invalid`): the bundle has the configured URL, no `localhost:8000`, and the notice; the default build has no notice. No `gsk_` in either bundle
+- `semgrep scan --validate`: 0 configuration errors, 23 rules
+- Linux wheels: every top-level requirement, and every package in the dev venv except `pywin32` (Windows-only), has a CPython 3.14 manylinux x86_64 wheel (`pip download --only-binary=:all:`), so the slim image needs no compiler
+- Live, native Windows (not Docker), production-like settings (`ALLOWED_ORIGINS=https://vibe-guard.example`, `ALLOWED_HOSTS`, `TRUSTED_PROXY_HOPS=1`, docs off, scratch `DATABASE_URL`/`UPLOAD_DIR`, the Docker `uvicorn` flags):
+  - `/api/health` 200; `/docs`, `/redoc`, `/openapi.json` 404; `Host: evil.example` → 400; no `server` header
+  - CORS: production-origin preflight 200 with allow-origin and no credentials; `http://localhost:5173` preflight 400; other-origin GET without allow-origin
+  - Mixed Python/Java/JavaScript project (9 files): the same ZIP through unchanged `2eb39fb` (git worktree) and through the new code → identical 15 findings, identical report fields and `score_details`, score 30 (AI off)
+  - Two simultaneous submissions → `201` + `503` (`Retry-After: 30`); 5 submissions with different spoofed left `X-Forwarded-For` entries and the same proxy-appended address → `201` ×5, the 6th → `429` (`Retry-After: 568`); another address → `201`
+  - Server hard-killed during `scanning`, then restarted → the scan is `failed` ("Scan interrupted by a server restart"), `source/` removed, `results/` kept, report → 409
+  - `GROQ_API_KEY` passed only through the process environment, `AI_MAX_FINDINGS=10` → AI `partial` (9 completed, 1 `invalid_output`, 5 skipped); findings and score unchanged (30). 81 API responses (51 finding details) contain no key, `gsk_`, server paths, `source/`, `scanner_metadata`, `stderr` or tracebacks; the key is not in the server logs, scan results, database, bundles, or any changed file
+  - Resources (Windows working set of the server process tree: server, pysemgrep, semgrep-core, Bandit): idle ~97–104 MB, peak 372–395 MB per scan; 6.2 s per scan with AI off (Semgrep 3.6–5.1 s; `--jobs 1` added ~0.6 s compared with `2eb39fb`), 64–119 s with AI on (Groq). The sampled CPU time of 0.8–1.3 s per scan is a lower bound (short-lived child processes are undersampled)
+  - Local `backend/uploads/` and database untouched (scratch directories only)
+
+Docker validation (2026-09-27, Docker Desktop 29.8.0, WSL2 kernel 6.18, cgroup v2):
+- Bug found and fixed: every scan failed in the Linux container (`Static analysis failed: semgrep`, exit 2). semgrep-core runs `uname -s` at startup, and the scanners' PATH is only the tool directory (`/usr/local/bin`, Phase 13 isolation). Fix: the Dockerfile links `uname` alone into `/usr/local/bin` (the PATH restriction is unchanged; nothing else from `/usr/bin` is exposed). `test_dockerfile` asserts the link. The Windows run never showed this
+- `docker build`: passes (56 s, build context ~100 kB, image 686 MB)
+- Linux test suite (image's Python/Semgrep/Bandit, repository mounted read-only): 259 run, all passed, 0 skipped (the Windows-only symlink test runs on Linux). The image's code is byte-identical to the repository's. `backend/README.md`'s documented container test command mounted only `tests/`, so the 7 tests that read repository files failed; corrected to mount the repository
+- `semgrep scan --validate` in the container: 0 errors, 23 rules
+- `--memory=512m --memory-swap=512m --cpus=0.1`, one worker, production-like settings, mixed Python/Java/JavaScript ZIP (9 files): startup to healthy 14–15.5 s; AI off: completed in 47 s (Semgrep 32 s, Bandit 10 s), 26 findings (15 HIGH, 9 MEDIUM, 2 LOW), score 28, cgroup peak 255 MiB; AI on (key passed with `-e GROQ_API_KEY`, `AI_MAX_FINDINGS=10`): completed in 94–113 s, same findings and score, AI `partial` (10 analyzed, 0 failed, rest skipped by the cap); cgroup `memory.peak` 464–501 MiB including reclaimable page cache, working set (`docker stats`) peak 304 MiB; 0 OOM events in every run
+- Image: runs as `app` (uid 10001); `/app` code root-owned and read-only for `app`; writable only `/app/data`, `/app/data/uploads`, `/home/app`, `/tmp`; no `.env`, database, `uploads/`, venv or tests; no gcc/git/curl/wget/ssh/sudo; the Groq key is in no image layer, image config, container log, database, result file, API response, repository file or bundle
+- Canary files (Python module, `conftest.py`, `setup.py`, Node script) that write marker files when run or imported: no marker after the scan
+- Functional checks in the container (46/46): health 200; `/docs`, `/redoc`, `/openapi.json` 404; bad `Host` 400 (before the upload is read); no `server` header; CORS (production origin allowed without credentials, localhost preflight 400, other origins no header, CORS header present on 429/503); concurrent submit 503 + `Retry-After: 30`; 5 submissions then 429 + `Retry-After` with spoofed left `X-Forwarded-For` entries ignored, another client accepted; only `results/` left after a scan; all report endpoints; SQLite on a named volume at `/app/data` survives restart and container re-creation; `docker kill -s KILL` during `scanning` → after restart the scan is `failed` ("Scan interrupted by a server restart"), `source/` removed, report 409, slot free; Docker `HEALTHCHECK` healthy
+- `npm run build` passes; with `VITE_API_URL`/`VITE_PUBLIC_DEMO=true` the bundle has the configured URL, no `localhost:8000`, and the notice
+Known limitations:
+- The in-memory limiter and slot are valid only with one worker process and reset on restart. A client that controls many addresses can exceed the per-address limit; the single scan slot bounds throughput
+- The slot is released by the background task. Starlette skips background tasks if sending the response raises; uvicorn ignores sends after a client disconnect, so this does not happen with the configured server, but another ASGI server could leak the slot until restart
+- The frontend shows `503` (busy) with its generic "The Vibe Guard API returned an error. Try again." message (`describeError` hides 5xx details); `429` shows its detail text. Left unchanged (the notice is the only approved UI change)
+- `TRUSTED_PROXY_HOPS=1` assumes Render's proxy appends the client address as the last `X-Forwarded-For` entry; this must be verified after deploying (a wrong value over-limits; it cannot be bypassed)
+- The `Host` header of Render's own health check is unknown; if `ALLOWED_HOSTS` rejects it, clear `ALLOWED_HOSTS`
+- At 0.1 CPU a 9-file scan takes ~47 s (Semgrep ~32–46 s of `SEMGREP_TIMEOUT=180`); much larger uploads may reach the Semgrep timeout on the free instance (the scan then fails cleanly)
+- Transitive Python dependencies are not pinned; the Linux image may resolve newer versions than the audited Windows venv (a constraints file is a 14b item)
+- The Debian base keeps its default setuid binaries (`su`, `passwd`, `mount`, ...); unused by the app, no root password
+- The first local start of the new backend (default `UPLOAD_DIR`) removes the leftover `source/` directories of five pre-Phase-13 scans in `backend/uploads/` (startup recovery, by design); their results and database rows stay
+
+Files changed:
+- `backend/main.py`
+- `backend/scanners.py`
+- `backend/.env.example`
+- `backend/README.md`
+- `README.md`
+- `src/components/Layout.jsx`
+- `backend/tests/test_phase12_hardening.py`
+- `backend/tests/test_pipeline_regression.py`
+- `backend/tests/test_database.py`
+- `backend/tests/test_reports.py`
+- `Vibe_Guard_Development_Status.md`
+- New: `backend/Dockerfile`, `backend/.dockerignore`, `render.yaml`, `backend/tests/test_phase14_deployment.py`
+
+---
 
 ## Phase 13
 

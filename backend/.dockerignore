@@ -1,0 +1,17 @@
+# Only runtime code enters the image (the Dockerfile copies files explicitly; this keeps the build context small
+# and makes sure secrets and local data are never sent to the Docker daemon).
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+uploads/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+tests/
+.pytest_cache/
+Dockerfile
+.dockerignore
+README.md

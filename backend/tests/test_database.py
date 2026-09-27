@@ -299,6 +299,8 @@ class PipelinePersistenceTests(DatabaseTestCase):
             mock.patch.object(main, "scan_registry", self.registry),
             mock.patch.dict(os.environ, {**{k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"},
                                          "VG_TEST_ENV_SECRET": ENV_SECRET}, clear=True),
+            # Not about the Phase 14 submission limit (test_phase14_deployment covers it)
+            mock.patch.object(main, "scan_rate_limiter", main.ScanRateLimiter(10**6, 600)),
         ]
         self.opener = FakeOpener()
         self.patches.append(mock.patch.object(ai_analysis, "_opener", self.opener))

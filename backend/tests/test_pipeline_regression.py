@@ -163,6 +163,9 @@ class PipelineRegressionTests(unittest.TestCase):
         self.registry.init()
         self.registry_patch = mock.patch.object(main, "scan_registry", self.registry)
         self.registry_patch.start()
+        # Not about the Phase 14 submission limit (test_phase14_deployment covers it)
+        self.limiter_patch = mock.patch.object(main, "scan_rate_limiter", main.ScanRateLimiter(10**6, 600))
+        self.limiter_patch.start()
         self.client = TestClient(main.app)
         # No test may reach Groq: the key is removed and the opener is a fake that records every call.
         self.env_patch = mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"},
@@ -174,6 +177,7 @@ class PipelineRegressionTests(unittest.TestCase):
 
     def tearDown(self):
         self.opener_patch.stop()
+        self.limiter_patch.stop()
         self.env_patch.stop()
         self.patch.stop()
         self.registry_patch.stop()
@@ -198,7 +202,8 @@ class PipelineRegressionTests(unittest.TestCase):
 
     def test_health_and_docs(self):
         self.assertEqual(self.client.get("/api/health").json(), {"status": "ok"})
-        self.assertEqual(self.client.get("/docs").status_code, 200)
+        # Phase 14: API docs are off unless ENABLE_DOCS=1 (covered in test_phase14_deployment)
+        self.assertEqual(self.client.get("/docs").status_code, 404 if not main.ENABLE_DOCS else 200)
 
     def test_upload_validation_regressions(self):
         post = lambda name, content: self.client.post(  # noqa: E731
