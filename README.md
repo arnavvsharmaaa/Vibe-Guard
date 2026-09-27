@@ -9,6 +9,59 @@ security vulnerabilities in AI-generated and AI-assisted application code.
 The system combines deterministic static security analysis with
 AI-assisted contextual analysis and remediation guidance.
 
+## 🚀 Live Demo
+
+**[Try Vibe Guard](https://vibe-guard-7c4d.onrender.com/)**
+
+Vibe Guard is currently deployed as a public demonstration on Render.
+
+**Links:** [Live Demo](https://vibe-guard-7c4d.onrender.com/) ·
+[GitHub repository](https://github.com/arnavvsharmaaa/Vibe-Guard) ·
+[Architecture](#2-project-architecture) ·
+[Master Blueprint](Blueprint.md) ·
+[Verified development status](Vibe_Guard_Development_Status.md) ·
+[Backend documentation](backend/README.md) ·
+[Render deployment](#demo-deployment-render--phase-14a)
+
+### Project Status
+
+**Phase 14a — COMPLETE**
+Public demo deployed and verified live on Render.
+
+Phases 1–13 (upload, scan lifecycle, static analysis, normalization, scoring,
+AI analysis, database, report API, frontend integration, testing and security
+hardening) are complete. Phase 14b (PostgreSQL + Docker Compose) has not
+started. The backend test suite passes on Linux in Docker (261/261).
+
+**Current stack:**
+React/Vite • FastAPI • Python • Semgrep • Bandit • Groq • SQLite • Docker • Render
+
+### What it does
+
+```text
+Upload code (ZIP or source file) → secure extraction (never executed)
+  → Semgrep + Bandit static analysis → normalized, deduplicated findings
+  → deterministic security score → Groq-assisted explanation and remediation
+  → security report and finding details in the React UI
+```
+
+* **Languages (demo-tested):** Python, Java, JavaScript, JSX
+* **Vulnerability scope:** SQL Injection, Cross-Site Scripting, Hardcoded Secrets,
+  Command Injection, Insecure Authentication, Weak Cryptography, Path Traversal
+* **AI is advisory:** the security score is computed deterministically from the
+  static findings; the AI explains and suggests fixes but never sets the score
+
+### Demo limitations
+
+This is a public demonstration, not production infrastructure
+(details: [Demo deployment (Render)](#demo-deployment-render--phase-14a)):
+
+* No authentication or user isolation — every visitor can see every scan
+* Free-tier SQLite persistence is not guaranteed — scans and reports are lost on
+  redeploys, restarts and spin-downs
+* One active scan at a time, and 5 scan submissions per 10 minutes per IP
+* Do not upload confidential, proprietary or sensitive source code
+
 ---
 
 # 1. Project Overview
@@ -90,14 +143,20 @@ separate FastAPI backend.
 ```text
 Vibe-Guard/
 │
-├── .cursor/                           # Cursor project configuration
-│
 ├── backend/                           # FastAPI backend
-│   ├── main.py
+│   ├── main.py                        # API, scan lifecycle, upload handling, limits
+│   ├── scanners.py                    # Semgrep + Bandit execution
+│   ├── normalization.py               # Finding normalization/deduplication
+│   ├── scoring.py                     # Deterministic security score
+│   ├── ai_analysis.py                 # Groq contextual analysis (server-side)
+│   ├── database.py                    # SQLAlchemy models (SQLite)
+│   ├── semgrep_rules/                 # Vibe Guard Semgrep rules
+│   ├── tests/                         # Backend test suite
+│   ├── Dockerfile                     # Backend container (Phase 14a)
 │   ├── requirements.txt
 │   ├── .env.example
 │   ├── README.md
-│   ├── uploads/                       # Runtime upload storage
+│   ├── uploads/                       # Runtime upload storage (not committed)
 │   └── ...
 │
 ├── src/                               # React frontend source
@@ -116,7 +175,8 @@ Vibe-Guard/
 ├── index.html
 ├── package.json
 ├── package-lock.json
-├── screen.png
+├── render.yaml                        # Render Blueprint (public demo)
+├── screen.png                         # Early design mockup (not the current UI)
 ├── Vibe_Guard_Development_Status.md   # 📝 IMPLEMENTATION STATUS
 ├── vibe_guard_react_ui_blueprint.md   # 🎨 FRONTEND UI REFERENCE
 └── vite.config.js
@@ -311,10 +371,10 @@ If the conflict cannot be resolved from the authoritative sources:
 **Status: ✅ COMPLETE**
 
 The Review 1 React frontend is implemented and serves as the canonical
-Vibe Guard interface.
+Vibe Guard interface. Since Phase 11 it uses real backend data instead of
+mock data.
 
-The frontend currently contains the established Review 1 experience,
-including:
+The frontend contains the established Review 1 experience, including:
 
 * Dashboard
 * New Scan
@@ -325,9 +385,9 @@ including:
 * Scan History
 * Settings
 * Existing navigation and UI components
-* Mock security findings and report data
+* Public-demo notice (shown when built with `VITE_PUBLIC_DEMO=true`)
 
-The existing UI should be preserved while backend functionality is built.
+The existing UI should be preserved.
 
 ---
 
@@ -946,7 +1006,7 @@ not merely mock vulnerability findings.
 
 # 21. Supported Vulnerability Scope
 
-The planned initial vulnerability scope includes:
+The initial vulnerability scope is:
 
 1. SQL Injection
 2. Cross-Site Scripting
@@ -956,7 +1016,8 @@ The planned initial vulnerability scope includes:
 6. Weak Encryption/Cryptography
 7. Path Traversal
 
-This is an initial supported scope.
+This is an initial supported scope, currently covered for Python, Java,
+JavaScript and JSX code.
 
 Vibe Guard must **not** claim universal vulnerability detection.
 
